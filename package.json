@@ -1,0 +1,24 @@
+{
+  "name": "browser-search-mcp",
+  "version": "1.0.0",
+  "description": "MCP server for real Chromium browser search and extraction",
+  "type": "module",
+  "main": "src/mcp-server.js",
+  "scripts": {
+    "start": "node src/mcp-server.js",
+    "test:mcporter": "bash scripts/test-mcporter.sh",
+    "docs": "typedoc src/ --out doc"
+  },
+  "devDependencies": {
+    "typedoc": "^0.28.0"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.17.4",
+    "@mozilla/readability": "^0.6.0",
+    "jsdom": "^27.0.0",
+    "puppeteer-core": "^24.21.0"
+  }
+}

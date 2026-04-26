@@ -1,0 +1,9 @@
+{
+  "entryPoints": ["src/"],
+  "out": "doc",
+  "name": "Browser Search MCP",
+  "readme": "README.md",
+  "includeVersion": true,
+  "plugin": [],
+  "theme": "default"
+}
