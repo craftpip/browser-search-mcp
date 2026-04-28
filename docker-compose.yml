@@ -7,11 +7,11 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "8.0"
-          memory: 16g
-        reservations:
           cpus: "4.0"
-          memory: 8g
+          memory: 2g
+        reservations:
+          cpus: "2.0"
+          memory: 1g
     environment:
       HEADLESS: ${HEADLESS:-true}
       ENABLE_VNC: ${ENABLE_VNC:-1}
@@ -35,6 +35,7 @@ services:
       SEARCH_MAX_WORKING_WINDOWS: ${SEARCH_MAX_WORKING_WINDOWS:-4}
       OPEN_PAGE_MAX_PARALLEL: ${OPEN_PAGE_MAX_PARALLEL:-4}
       MAX_CONCURRENT_PAGE_OPS: ${MAX_CONCURRENT_PAGE_OPS:-30}
+      HUMAN_TYPING_DELAY: ${HUMAN_TYPING_DELAY:-15}
     volumes:
       - .:/app
       - /app/node_modules

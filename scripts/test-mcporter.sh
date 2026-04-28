@@ -53,10 +53,14 @@ echo "[mcporter-test] calling web_search"
 CALL_JSON="$(npx mcporter call "$SERVER_NAME.web_search" query='mcp protocol' limit=1 engine=duckduckgo --config "$CONFIG_PATH" --output json)"
 node -e '
   const payload = JSON.parse(process.argv[1]);
-  if (!Array.isArray(payload.results) || payload.results.length < 1) {
+  const content = payload.content || [];
+  const text = content[0]?.text || "";
+  if (!text.includes("result id")) {
     throw new Error(`unexpected web_search payload: ${process.argv[1]}`);
   }
-  console.log(`[mcporter-test] call ok: ${payload.results[0].title || "(untitled)"}`);
+  const titleMatch = text.match(/\*\*([^*]+)\*\*/);
+  const title = titleMatch ? titleMatch[1] : "(untitled)";
+  console.log(`[mcporter-test] call ok: ${title}`);
 ' "$CALL_JSON"
 
 echo "[mcporter-test] PASS"
