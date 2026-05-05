@@ -2,6 +2,7 @@ import http from "node:http";
 import path from "node:path";
 import fs from "node:fs/promises";
 import { randomUUID } from "node:crypto";
+import { performance } from "node:perf_hooks";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -188,6 +189,31 @@ function logEvent(label, payload) {
   }
   const suffix = inline ? ` ${inline}` : "";
   console.error(`[${timestamp}] ${label}${suffix}`);
+}
+
+function createExecutionTimer(label, context = {}) {
+  const startedAtMs = performance.now();
+  const steps = [];
+
+  return {
+    step(name, startMs) {
+      const endMs = performance.now();
+      const from = Number.isFinite(startMs) ? startMs : startedAtMs;
+      const durationMs = Math.max(0, Math.round(endMs - from));
+      steps.push({ name, durationMs });
+      return endMs;
+    },
+    end(extra = {}) {
+      const totalDurationMs = Math.max(0, Math.round(performance.now() - startedAtMs));
+      logEvent(label, {
+        ...context,
+        totalDurationMs,
+        steps,
+        ...extra
+      });
+      return totalDurationMs;
+    }
+  };
 }
 
 function logBootConfig(config) {
@@ -811,11 +837,20 @@ function getToolsListResponse() {
 }
 
 async function handleToolCall(name, args = {}) {
+  const timer = createExecutionTimer("mcp.tool.timing", {
+    tool: name,
+    mode: "mcp"
+  });
+  let mark = performance.now();
+
   if (name === "web_search") {
     const cached = getCachedToolResult(name, args);
     if (cached) {
+      timer.step("cache_hit", mark);
+      timer.end({ cacheHit: true, status: "ok" });
       return cached;
     }
+    mark = timer.step("cache_miss", mark);
     const queries = parseQueryList(args.queries);
     if (!queries.length) {
       assertString(args.query, "query");
@@ -828,6 +863,7 @@ async function handleToolCall(name, args = {}) {
     if (!engines.length) {
       engines.push("google");
     }
+    mark = timer.step("validate_inputs", mark);
 
     const results = await browserSearch({
       query: args.query,
@@ -835,31 +871,46 @@ async function handleToolCall(name, args = {}) {
       limit,
       engines
     });
+    mark = timer.step("browser_search", mark);
     const response = formatSearchResponse(decorateSearchPayload(results));
+    mark = timer.step("format_response", mark);
     setCachedToolResult(name, args, response);
+    timer.step("cache_store", mark);
+    timer.end({ cacheHit: false, status: "ok" });
     return response;
   }
 
   if (name === "web_open_page") {
     const cached = getCachedToolResult(name, args);
     if (cached) {
+      timer.step("cache_hit", mark);
+      timer.end({ cacheHit: true, status: "ok" });
       return cached;
     }
+    mark = timer.step("cache_miss", mark);
     let targetUrls;
     try {
       targetUrls = resolveOpenTarget(args);
     } catch (error) {
+      timer.step("resolve_targets_failed", mark);
+      timer.end({ cacheHit: false, status: "error", error: String(error?.message || error) });
       logEvent("mcp.error", {
         tool: name,
         error: String(error?.message || error)
       });
       throw error;
     }
+    mark = timer.step("resolve_targets", mark);
     const maxChars = parseMaxChars(args.maxChars, 8000);
     const manager = await getBrowserManager();
+    mark = timer.step("prepare_execution", mark);
     const result = await openTargetsParallel(targetUrls, maxChars, manager.config.openPageMaxParallel);
+    mark = timer.step("open_targets", mark);
     const response = formatOpenPageResponse(result);
+    mark = timer.step("format_response", mark);
     setCachedToolResult(name, args, response);
+    timer.step("cache_store", mark);
+    timer.end({ cacheHit: false, status: "ok" });
     return response;
   }
 
@@ -868,12 +919,15 @@ async function handleToolCall(name, args = {}) {
     try {
       targetUrls = resolveOpenTarget(args);
     } catch (error) {
+      timer.step("resolve_targets_failed", mark);
+      timer.end({ status: "error", error: String(error?.message || error) });
       logEvent("mcp.error", {
         tool: name,
         error: String(error?.message || error)
       });
       throw error;
     }
+    mark = timer.step("resolve_targets", mark);
     const manager = await getBrowserManager();
     const formatRaw = typeof args.format === "string" ? args.format.trim().toLowerCase() : "png";
     const format = formatRaw === "jpeg" ? "jpeg" : "png";
@@ -883,16 +937,24 @@ async function handleToolCall(name, args = {}) {
       quality = Math.min(100, Math.max(1, quality));
     }
     const fullPage = args.fullPage === undefined ? true : Boolean(args.fullPage);
+    mark = timer.step("prepare_execution", mark);
 
     const result = await captureScreenshotsParallel(targetUrls, manager.config.openPageMaxParallel, {
       format,
       fullPage,
       ...(quality ? { quality } : {})
     });
+    mark = timer.step("capture_screenshots", mark);
     await applyScreenshotStorage(result, manager.config);
-    return formatScreenshotResponse(result);
+    mark = timer.step("store_screenshots", mark);
+    const response = formatScreenshotResponse(result);
+    timer.step("format_response", mark);
+    timer.end({ status: "ok" });
+    return response;
   }
 
+  timer.step("unknown_tool", mark);
+  timer.end({ status: "error", error: `Unknown tool: ${name}` });
   throw new Error(`Unknown tool: ${name}`);
 }
 
@@ -1124,6 +1186,12 @@ async function maybeStartHttpServer(managerOverride) {
       }
 
       if (url.pathname === "/search") {
+        const timer = createExecutionTimer("http.timing", {
+          mode: "http",
+          method,
+          path: url.pathname
+        });
+        let mark = performance.now();
         logEvent("http.request", {
           method,
           path: url.pathname,
@@ -1162,15 +1230,25 @@ async function maybeStartHttpServer(managerOverride) {
         if (!engines.length) {
           engines.push("google");
         }
+        mark = timer.step("parse_inputs", mark);
 
         const payload = decorateSearchPayload(await browserSearch({ query, queries, limit, engines }));
+        mark = timer.step("browser_search", mark);
         const markdown = formatSearchMarkdown(payload);
+        timer.step("format_response", mark);
+        timer.end({ status: "ok" });
         logEvent("http.response", { method, path: url.pathname, result: payload });
         sendMarkdown(res, 200, markdown);
         return;
       }
 
       if (url.pathname === "/extract") {
+        const timer = createExecutionTimer("http.timing", {
+          mode: "http",
+          method,
+          path: url.pathname
+        });
+        let mark = performance.now();
         logEvent("http.request", {
           method,
           path: url.pathname,
@@ -1185,19 +1263,31 @@ async function maybeStartHttpServer(managerOverride) {
             path: url.pathname,
             error: String(error?.message || error)
           });
+          timer.step("resolve_targets_failed", mark);
+          timer.end({ status: "error", error: String(error?.message || error) });
           sendJson(res, 400, { ok: false, error: String(error?.message || error) });
           return;
         }
+        mark = timer.step("resolve_targets", mark);
 
         const maxChars = parseMaxChars(url.searchParams.get("maxChars"), 8000);
         const payload = await openTargetsParallel(targetUrls, maxChars, manager.config.openPageMaxParallel);
+        mark = timer.step("open_targets", mark);
         const markdown = formatOpenPageResponse(payload).content[0].text;
+        timer.step("format_response", mark);
+        timer.end({ status: "ok" });
         logEvent("http.response", { method, path: url.pathname, result: payload });
         sendMarkdown(res, 200, markdown);
         return;
       }
 
       if (url.pathname === "/screenshot") {
+        const timer = createExecutionTimer("http.timing", {
+          mode: "http",
+          method,
+          path: url.pathname
+        });
+        let mark = performance.now();
         logEvent("http.request", {
           method,
           path: url.pathname,
@@ -1212,9 +1302,12 @@ async function maybeStartHttpServer(managerOverride) {
             path: url.pathname,
             error: String(error?.message || error)
           });
+          timer.step("resolve_targets_failed", mark);
+          timer.end({ status: "error", error: String(error?.message || error) });
           sendJson(res, 400, { ok: false, error: String(error?.message || error) });
           return;
         }
+        mark = timer.step("resolve_targets", mark);
 
         const formatParam = String(url.searchParams.get("format") || "png").trim().toLowerCase();
         const format = formatParam === "jpeg" ? "jpeg" : "png";
@@ -1226,14 +1319,19 @@ async function maybeStartHttpServer(managerOverride) {
           fullPage,
           ...(quality ? { quality } : {})
         };
+        mark = timer.step("parse_options", mark);
 
         const payload = await captureScreenshotsParallel(
           targetUrls,
           manager.config.openPageMaxParallel,
           options
         );
+        mark = timer.step("capture_screenshots", mark);
         await applyScreenshotStorage(payload, manager.config);
+        mark = timer.step("store_screenshots", mark);
         const markdown = formatScreenshotResponse(payload).content[0].text;
+        timer.step("format_response", mark);
+        timer.end({ status: "ok" });
         logEvent("http.response", { method, path: url.pathname, result: payload });
         sendMarkdown(res, 200, markdown);
         return;
