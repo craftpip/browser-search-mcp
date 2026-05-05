@@ -22,6 +22,11 @@ const CLONE_EXCLUDE_DIRS = new Set([
 ]);
 const MONITOR_WIDTH = 1920;
 const MONITOR_HEIGHT = 1080;
+const ENGINE_STARTUP_URLS = {
+  bing: "https://www.bing.com/",
+  duckduckgo: "https://duckduckgo.com/",
+  google: "https://www.google.com/"
+};
 
 function isLockError(error) {
   const message = String(error?.message || "").toLowerCase();
@@ -512,14 +517,22 @@ export class BrowserManager {
           waitUntil: "domcontentloaded",
           timeout: this.config.browserOpTimeoutMs
         });
-        return;
+      } else {
+        const page = await this.newPage();
+        await page.goto(this.config.startupUrl, {
+          waitUntil: "domcontentloaded",
+          timeout: this.config.browserOpTimeoutMs
+        });
       }
 
-      const page = await this.newPage();
-      await page.goto(this.config.startupUrl, {
-        waitUntil: "domcontentloaded",
-        timeout: this.config.browserOpTimeoutMs
-      });
+      await Promise.allSettled(
+        this.config.searchEngines.map((engine) =>
+          this.ensureMinWorkingWindows(engine, {
+            startupUrl: ENGINE_STARTUP_URLS[engine] || "about:blank",
+            waitUntil: "domcontentloaded"
+          })
+        )
+      );
     })();
 
     return this.prelaunchPromise;

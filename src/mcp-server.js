@@ -18,6 +18,48 @@ const linkMemoryByUrl = new Map();
 let nextLinkRef = 1;
 const screenshotDownloadById = new Map();
 const screenshotStorageDir = path.join(process.cwd(), "screenshots");
+const TOOL_CACHE_TTL_MS = 10 * 60 * 1000;
+const toolResultCache = {
+  web_search: new Map(),
+  web_open_page: new Map()
+};
+
+function stableStringify(value) {
+  if (value === null || value === undefined) return "null";
+  if (typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableStringify(item)).join(",")}]`;
+  }
+  const keys = Object.keys(value).sort();
+  return `{${keys.map((key) => `${JSON.stringify(key)}:${stableStringify(value[key])}`).join(",")}}`;
+}
+
+function getCacheKey(args) {
+  return stableStringify(args || {});
+}
+
+function getCachedToolResult(toolName, args) {
+  const bucket = toolResultCache[toolName];
+  if (!bucket) return null;
+  const key = getCacheKey(args);
+  const entry = bucket.get(key);
+  if (!entry) return null;
+  if (entry.expiresAt <= Date.now()) {
+    bucket.delete(key);
+    return null;
+  }
+  return entry.value;
+}
+
+function setCachedToolResult(toolName, args, value) {
+  const bucket = toolResultCache[toolName];
+  if (!bucket) return;
+  const key = getCacheKey(args);
+  bucket.set(key, {
+    value,
+    expiresAt: Date.now() + TOOL_CACHE_TTL_MS
+  });
+}
 
 function asMarkdownContent(text) {
   return {
@@ -268,7 +310,7 @@ function decorateResultLinks(results) {
 
     return {
       ...item,
-      ref,
+      ref_id: ref,
       link: display,
       url: display
     };
@@ -306,7 +348,8 @@ function formatSearchMarkdown(payload) {
   if (results.length) {
     lines.push("", `**Results (${results.length}):**`);
     results.forEach((result, index) => {
-      const refLabel = result?.ref ? `[result id ${result.ref}]` : `${index + 1}.`;
+      const refId = result?.ref_id;
+      const refLabel = refId ? `[ref_id ${refId}]` : `${index + 1}.`;
       const titleText = cleanTitle(result?.title || "");
       const title = titleText ? `**${titleText}**` : "Untitled";
       const link = result?.link || result?.url || "";
@@ -323,7 +366,7 @@ function formatSearchMarkdown(payload) {
     });
     lines.push(
       "",
-      "Use the result id with `/extract?ref=<id>` or `/screenshot?ref=<id>`, or MCP tools `web_open_page` / `web_page_screenshot` with `ref`."
+      "Use `ref_id` with `/extract?ref_id=<id>` or `/screenshot?ref_id=<id>`, or MCP tools `web_open_page` / `web_page_screenshot` with `ref_id`."
     );
   } else {
     lines.push("", "No results returned.");
@@ -402,7 +445,7 @@ function formatOpenPageResponse(payload) {
   const lines = [`Processed ${total} page(s); ${successCount} succeeded.`];
 
   entries.forEach((entry, index) => {
-    const refLabel = entry?.ref ? `[${entry.ref}]` : `#${index + 1}`;
+    const refLabel = entry?.ref_id ? `[${entry.ref_id}]` : `#${index + 1}`;
     const title = entry?.title || entry?.url || `Page ${index + 1}`;
     lines.push("", `### ${refLabel} ${title}`);
     lines.push(`- Status: ${entry?.ok === false ? "Failed" : "Success"}`);
@@ -432,7 +475,7 @@ function formatScreenshotResponse(payload) {
   const lines = [`Captured ${total} screenshot(s); ${successCount} succeeded.`];
 
   entries.forEach((entry, index) => {
-    const refLabel = entry?.ref ? `[${entry.ref}]` : `#${index + 1}`;
+    const refLabel = entry?.ref_id ? `[${entry.ref_id}]` : `#${index + 1}`;
     const title = entry?.title || entry?.url || `Screenshot ${index + 1}`;
     lines.push("", `### ${refLabel} ${title}`);
     lines.push(`- Status: ${entry?.ok === false ? "Failed" : "Success"}`);
@@ -466,50 +509,53 @@ function formatScreenshotResponse(payload) {
 }
 
 function resolveOpenTarget(args) {
+  const normalizedRef = args?.ref_id ?? args?.ref;
+  const normalizedRefs = args?.ref_ids ?? args?.refs;
   const hasUrl = args && Object.prototype.hasOwnProperty.call(args, "url");
   const hasUrls = args && Object.prototype.hasOwnProperty.call(args, "urls");
-  const hasRef = args && Object.prototype.hasOwnProperty.call(args, "ref");
-  const hasRefs = args && Object.prototype.hasOwnProperty.call(args, "refs");
+  const hasRef = args && (Object.prototype.hasOwnProperty.call(args, "ref_id") || Object.prototype.hasOwnProperty.call(args, "ref"));
+  const hasRefs = args && (Object.prototype.hasOwnProperty.call(args, "ref_ids") || Object.prototype.hasOwnProperty.call(args, "refs"));
 
   if (hasUrls) {
-    if (!Array.isArray(args.urls) || !args.urls.length) {
-      throw new Error("Invalid input: urls must be a non-empty array of URLs");
+    if (Array.isArray(args.urls) && args.urls.length) {
+      return args.urls.map((item) => {
+        assertString(item, "urls[]");
+        return String(item).trim();
+      });
     }
-    return args.urls.map((item) => {
-      assertString(item, "urls[]");
-      return String(item).trim();
-    });
   }
 
   if (hasRefs) {
-    if (!Array.isArray(args.refs) || !args.refs.length) {
-      throw new Error("Invalid input: refs must be a non-empty array of numbers");
+    if (Array.isArray(normalizedRefs) && normalizedRefs.length) {
+      return normalizedRefs.map((item) => {
+        const ref = parsePositiveInt(item, "ref_ids[]");
+        const remembered = linkMemoryByRef.get(ref);
+        if (!remembered) {
+          throw new Error(`No link found in memory for ref ${ref}`);
+        }
+        return remembered;
+      });
     }
-    return args.refs.map((item) => {
-      const ref = parsePositiveInt(item, "refs[]");
+  }
+
+  if (hasRef) {
+    if (normalizedRef !== undefined && normalizedRef !== null && String(normalizedRef).trim()) {
+      const ref = parsePositiveInt(normalizedRef, "ref_id");
       const remembered = linkMemoryByRef.get(ref);
       if (!remembered) {
         throw new Error(`No link found in memory for ref ${ref}`);
       }
-      return remembered;
-    });
-  }
-
-  if (hasRef) {
-    const ref = parsePositiveInt(args.ref, "ref");
-    const remembered = linkMemoryByRef.get(ref);
-    if (!remembered) {
-      throw new Error(`No link found in memory for ref ${ref}`);
+      return [remembered];
     }
-    return [remembered];
   }
 
   if (hasUrl) {
-    assertString(args.url, "url");
-    return [String(args.url).trim()];
+    if (typeof args.url === "string" && args.url.trim()) {
+      return [String(args.url).trim()];
+    }
   }
 
-  throw new Error("Invalid input: provide one of url, urls, ref, or refs");
+  throw new Error("Invalid input: provide one of url, urls, ref_id/ref, or ref_ids/refs");
 }
 
 function buildBatchResultPayload(targetUrls, opened) {
@@ -554,14 +600,14 @@ async function openTargetsParallel(targetUrls, maxChars, maxParallel) {
         return {
           index,
           ok: true,
-          ref: rememberLink(targetUrl),
+          ref_id: rememberLink(targetUrl),
           ...page
         };
       } catch (error) {
         return {
           index,
           ok: false,
-          ref: rememberLink(targetUrl),
+          ref_id: rememberLink(targetUrl),
           url: targetUrl,
           error: String(error?.message || error)
         };
@@ -582,14 +628,14 @@ async function captureScreenshotsParallel(targetUrls, maxParallel, captureOption
         return {
           index,
           ok: true,
-          ref: rememberLink(targetUrl),
+          ref_id: rememberLink(targetUrl),
           ...capture
         };
       } catch (error) {
         return {
           index,
           ok: false,
-          ref: rememberLink(targetUrl),
+          ref_id: rememberLink(targetUrl),
           url: targetUrl,
           error: String(error?.message || error)
         };
@@ -601,14 +647,14 @@ async function captureScreenshotsParallel(targetUrls, maxParallel, captureOption
 }
 
 function parseHttpExtractTargets(searchParams) {
-  const refsParam = String(searchParams.get("refs") || "")
+  const refsParam = String(searchParams.get("ref_ids") || "")
     .split(",")
     .map((item) => item.trim())
     .filter(Boolean);
 
   if (refsParam.length) {
     return refsParam.map((item) => {
-      const ref = parsePositiveInt(item, "refs[]");
+      const ref = parsePositiveInt(item, "ref_ids[]");
       const remembered = linkMemoryByRef.get(ref);
       if (!remembered) {
         throw new Error(`No link found in memory for ref ${ref}`);
@@ -625,9 +671,9 @@ function parseHttpExtractTargets(searchParams) {
     return urlsParam;
   }
 
-  const refParam = searchParams.get("ref");
+  const refParam = searchParams.get("ref_id");
   if (refParam && refParam.trim()) {
-    const ref = parsePositiveInt(refParam, "ref");
+    const ref = parsePositiveInt(refParam, "ref_id");
     const remembered = linkMemoryByRef.get(ref);
     if (!remembered) {
       throw new Error(`No link found in memory for ref ${ref}`);
@@ -638,7 +684,7 @@ function parseHttpExtractTargets(searchParams) {
   const urlParam = String(searchParams.get("url") || "").trim();
   if (urlParam) return [urlParam];
 
-  throw new Error("Missing url, urls, ref, or refs query parameter");
+  throw new Error("Missing url, urls, ref_id, or ref_ids query parameter");
 }
 
 async function readJsonBody(req) {
@@ -691,7 +737,7 @@ function getToolsListResponse() {
       {
         name: "web_open_page",
         description:
-          "Open one or more pages and return clean readable text for analysis. Use this after web_search via ref/refs or with direct url/urls for summarization, extraction, QA, and synthesis.",
+          "Open one or more pages and return clean readable text for analysis. Use this after web_search via ref_id/ref_ids or with direct url/urls for summarization, extraction, QA, and synthesis.",
         inputSchema: {
           type: "object",
           properties: {
@@ -701,18 +747,18 @@ function getToolsListResponse() {
               items: { type: "string" },
               description: "Multiple URLs to open in parallel"
             },
-            ref: {
+            ref_id: {
               type: "number",
               description: "Result id returned by a previous web_search call"
             },
-            refs: {
+            ref_ids: {
               type: "array",
               items: { type: "number" },
               description: "Multiple result ids returned by a previous web_search call"
             },
             maxChars: { type: "number", default: 8000 }
           },
-          description: "Provide one of: url, urls, ref, or refs. Prefer ref/refs from web_search when available.",
+          description: "Provide one of: url, urls, ref_id, or ref_ids. Prefer ref_id/ref_ids from web_search when available.",
           additionalProperties: false
         }
       },
@@ -729,11 +775,11 @@ function getToolsListResponse() {
               items: { type: "string" },
               description: "Multiple URLs to open in parallel"
             },
-            ref: {
+            ref_id: {
               type: "number",
               description: "Result id returned by a previous web_search call"
             },
-            refs: {
+            ref_ids: {
               type: "array",
               items: { type: "number" },
               description: "Multiple result ids returned by a previous web_search call"
@@ -756,7 +802,7 @@ function getToolsListResponse() {
               description: "Capture the entire page, not just the viewport"
             }
           },
-          description: "Provide one of: url, urls, ref, or refs. Prefer ref/refs from web_search when available.",
+          description: "Provide one of: url, urls, ref_id, or ref_ids. Prefer ref_id/ref_ids from web_search when available.",
           additionalProperties: false
         }
       }
@@ -766,6 +812,10 @@ function getToolsListResponse() {
 
 async function handleToolCall(name, args = {}) {
   if (name === "web_search") {
+    const cached = getCachedToolResult(name, args);
+    if (cached) {
+      return cached;
+    }
     const queries = parseQueryList(args.queries);
     if (!queries.length) {
       assertString(args.query, "query");
@@ -785,10 +835,16 @@ async function handleToolCall(name, args = {}) {
       limit,
       engines
     });
-    return formatSearchResponse(decorateSearchPayload(results));
+    const response = formatSearchResponse(decorateSearchPayload(results));
+    setCachedToolResult(name, args, response);
+    return response;
   }
 
   if (name === "web_open_page") {
+    const cached = getCachedToolResult(name, args);
+    if (cached) {
+      return cached;
+    }
     let targetUrls;
     try {
       targetUrls = resolveOpenTarget(args);
@@ -802,7 +858,9 @@ async function handleToolCall(name, args = {}) {
     const maxChars = parseMaxChars(args.maxChars, 8000);
     const manager = await getBrowserManager();
     const result = await openTargetsParallel(targetUrls, maxChars, manager.config.openPageMaxParallel);
-    return formatOpenPageResponse(result);
+    const response = formatOpenPageResponse(result);
+    setCachedToolResult(name, args, response);
+    return response;
   }
 
   if (name === "web_page_screenshot") {
@@ -842,6 +900,11 @@ async function handleStatelessMcpPost(body) {
   const id = body?.id ?? null;
   const method = String(body?.method || "");
 
+  // JSON-RPC notifications (no id) must not receive a response
+  if (id === null && !body.hasOwnProperty("id")) {
+    return null;
+  }
+
   if (method === "initialize") {
     return {
       jsonrpc: "2.0",
@@ -865,8 +928,8 @@ async function handleStatelessMcpPost(body) {
     return { jsonrpc: "2.0", id, result };
   }
 
-  if (method === "notifications/initialized") {
-    return { jsonrpc: "2.0", id, result: {} };
+  if (method === "notifications/initialized" || method.startsWith("notifications/")) {
+    return null;
   }
 
   return {
@@ -969,6 +1032,12 @@ async function maybeStartHttpServer(managerOverride) {
           }
 
           const response = await handleStatelessMcpPost(body);
+          if (response === null) {
+            logEvent("http.mcp.notification", { method, path: url.pathname, stateless: true, body });
+            res.writeHead(204);
+            res.end();
+            return;
+          }
           logEvent("http.mcp.response", { method, path: url.pathname, stateless: true, result: response });
           sendJson(res, 200, response);
           return;

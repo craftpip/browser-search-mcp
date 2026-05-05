@@ -996,7 +996,7 @@ export async function browserOpenAndExtract({ url, maxChars = 8000, includeSeoAn
 
     try {
       await page.goto(url, {
-        waitUntil: manager.config.navWaitUntil,
+        waitUntil: "domcontentloaded",
         timeout: manager.config.browserOpTimeoutMs
       });
 
@@ -1012,8 +1012,6 @@ export async function browserOpenAndExtract({ url, maxChars = 8000, includeSeoAn
           { timeout: Math.min(10000, manager.config.browserOpTimeoutMs) }
         )
         .catch(() => null);
-
-      await new Promise((resolve) => setTimeout(resolve, 1000));
 
       const seoSnapshot =
         includeSeoAnalysis === false
@@ -1093,8 +1091,6 @@ export async function browserCaptureScreenshot({
           { timeout: Math.min(10000, manager.config.browserOpTimeoutMs) }
         )
         .catch(() => null);
-
-      await new Promise((resolve) => setTimeout(resolve, 250));
 
       const dimensions = await page.evaluate(() => {
         const docEl = document.documentElement;

@@ -88,11 +88,11 @@ You can run both transports together by keeping `ENABLE_STDIO_MCP=1` and setting
 Tools exposed:
 
 - `web_search` input: `{ query?, queries?, limit?, engines?, engine? }`
-- `web_open_page` input: `{ url? | urls? | ref? | refs?, maxChars? }`
-- `web_page_screenshot` input: `{ url? | urls? | ref? | refs?, format?, quality?, fullPage? }`
+- `web_open_page` input: `{ url? | urls? | ref_id? | ref_ids?, maxChars? }`
+- `web_page_screenshot` input: `{ url? | urls? | ref_id? | ref_ids?, format?, quality?, fullPage? }`
 
 `web_search` labels each result link with a numeric reference like `[1]` and truncates displayed links to 50 characters.
-`web_open_page` can open by direct `url`/`urls` or by `ref`/`refs` from previous `web_search` results.
+`web_open_page` can open by direct `url`/`urls` or by `ref_id`/`ref_ids` from previous `web_search` results.
 
 ## Agent Inference Guide
 
@@ -108,7 +108,7 @@ Use this section as the tool contract for LLM/agent planning and calling.
   - optional `engines` array of engines
 - Output highlights:
   - `results[]` contains `title`, `snippet`, `llmText`
-  - `results[].ref` is a numeric handle for follow-up page opens
+  - `results[].ref_id` is a numeric handle for follow-up page opens
   - `results[].link` and `results[].url` are display-safe (`[n]` + truncated link)
 
 `web_open_page`
@@ -117,11 +117,11 @@ Use this section as the tool contract for LLM/agent planning and calling.
 - Input (choose one mode):
   - single URL: `{ "url": "https://..." }`
   - multiple URLs: `{ "urls": ["https://...", "https://..."] }`
-  - single ref from `web_search`: `{ "ref": 1 }`
-  - multiple refs: `{ "refs": [1, 2, 3] }`
+  - single ref from `web_search`: `{ "ref_id": 1 }`
+  - multiple refs: `{ "ref_ids": [1, 2, 3] }`
   - optional `maxChars` number (default `8000`)
 - Behavior:
-  - when `urls`/`refs` are provided, opens in parallel up to `OPEN_PAGE_MAX_PARALLEL`
+  - when `urls`/`ref_ids` are provided, opens in parallel up to `OPEN_PAGE_MAX_PARALLEL`
   - returns per-item success/error for multi-open calls
   - response now includes `seo`, a tree-aware snapshot with:
     - `title`, `canonicalUrl`, `metaDescription`
@@ -136,7 +136,7 @@ Use this section as the tool contract for LLM/agent planning and calling.
 - Input (choose one mode):
   - `{ "url": "https://..." }`
   - `{ "urls": ["https://...", "https://..."] }`
-  - `{ "ref": 1 }` or `{ "refs": [1, 2] }` from the latest `web_search`
+  - `{ "ref_id": 1 }` or `{ "ref_ids": [1, 2] }` from the latest `web_search`
   - optional `format` (`png` | `jpeg`, default `png`)
   - optional `quality` (1-100, JPEG only)
   - optional `fullPage` (default `true`)
@@ -147,15 +147,15 @@ Use this section as the tool contract for LLM/agent planning and calling.
 
 Recommended agent flow
 1. Call `web_search` with user intent.
-2. Pick best result refs from `results[].ref`.
-3. Call `web_open_page` with `ref` or `refs`.
+2. Pick best result refs from `results[].ref_id`.
+3. Call `web_open_page` with `ref_id` or `ref_ids`.
 4. Synthesize answer from extracted text.
 
-Need to show what the agent saw? Call `web_page_screenshot` with the same `ref`/`refs` to capture the rendered page state as an image.
+Need to show what the agent saw? Call `web_page_screenshot` with the same `ref_id`/`ref_ids` to capture the rendered page state as an image.
 
 Notes for agents
 - Ref memory is process-local and resets when server restarts.
-- Prefer `ref`/`refs` immediately after a search in the same session.
+- Prefer `ref_id`/`ref_ids` immediately after a search in the same session.
 
 `web_search` runs all selected engines in parallel and returns an LLM-friendly payload:
 
