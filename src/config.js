@@ -139,6 +139,8 @@ export async function loadConfig() {
     maxConcurrentPageOps: Math.max(1, Math.min(30, parseInteger(process.env.MAX_CONCURRENT_PAGE_OPS, 30))),
     humanTypingDelay: Math.max(0, Math.min(500, parseInteger(process.env.HUMAN_TYPING_DELAY, 15))),
     prelaunchBrowser: parseBoolean(process.env.PRELAUNCH_BROWSER, true),
+    enableHangRestart: parseBoolean(process.env.ENABLE_HANG_RESTART, false),
+    hangRestartTimeoutMs: parseNumber(process.env.HANG_RESTART_TIMEOUT_MS, 120000),
     startupUrl: process.env.STARTUP_URL || "about:blank",
     searchEngines: parseEngines(process.env.SEARCH_ENGINES, ["bing", "duckduckgo", "google"])
   };

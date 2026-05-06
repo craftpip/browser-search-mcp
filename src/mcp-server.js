@@ -238,7 +238,9 @@ function logBootConfig(config) {
     searchKeepMinWorkingWindows: config.searchKeepMinWorkingWindows,
     searchMaxWorkingWindows: config.searchMaxWorkingWindows,
     openPageMaxParallel: config.openPageMaxParallel,
-    maxConcurrentPageOps: config.maxConcurrentPageOps
+    maxConcurrentPageOps: config.maxConcurrentPageOps,
+    enableHangRestart: config.enableHangRestart,
+    hangRestartTimeoutMs: config.hangRestartTimeoutMs
   });
 }
 
@@ -865,12 +867,14 @@ async function handleToolCall(name, args = {}) {
     }
     mark = timer.step("validate_inputs", mark);
 
-    const results = await browserSearch({
-      query: args.query,
-      queries,
-      limit,
-      engines
-    });
+    const results = await runWithHangGuard(`mcp:${name}`, () =>
+      browserSearch({
+        query: args.query,
+        queries,
+        limit,
+        engines
+      })
+    );
     mark = timer.step("browser_search", mark);
     const response = formatSearchResponse(decorateSearchPayload(results));
     mark = timer.step("format_response", mark);
@@ -904,7 +908,9 @@ async function handleToolCall(name, args = {}) {
     const maxChars = parseMaxChars(args.maxChars, 8000);
     const manager = await getBrowserManager();
     mark = timer.step("prepare_execution", mark);
-    const result = await openTargetsParallel(targetUrls, maxChars, manager.config.openPageMaxParallel);
+    const result = await runWithHangGuard(`mcp:${name}`, () =>
+      openTargetsParallel(targetUrls, maxChars, manager.config.openPageMaxParallel)
+    );
     mark = timer.step("open_targets", mark);
     const response = formatOpenPageResponse(result);
     mark = timer.step("format_response", mark);
@@ -939,11 +945,13 @@ async function handleToolCall(name, args = {}) {
     const fullPage = args.fullPage === undefined ? true : Boolean(args.fullPage);
     mark = timer.step("prepare_execution", mark);
 
-    const result = await captureScreenshotsParallel(targetUrls, manager.config.openPageMaxParallel, {
-      format,
-      fullPage,
-      ...(quality ? { quality } : {})
-    });
+    const result = await runWithHangGuard(`mcp:${name}`, () =>
+      captureScreenshotsParallel(targetUrls, manager.config.openPageMaxParallel, {
+        format,
+        fullPage,
+        ...(quality ? { quality } : {})
+      })
+    );
     mark = timer.step("capture_screenshots", mark);
     await applyScreenshotStorage(result, manager.config);
     mark = timer.step("store_screenshots", mark);
@@ -1232,7 +1240,9 @@ async function maybeStartHttpServer(managerOverride) {
         }
         mark = timer.step("parse_inputs", mark);
 
-        const payload = decorateSearchPayload(await browserSearch({ query, queries, limit, engines }));
+        const payload = decorateSearchPayload(
+          await runWithHangGuard("http:/search", () => browserSearch({ query, queries, limit, engines }))
+        );
         mark = timer.step("browser_search", mark);
         const markdown = formatSearchMarkdown(payload);
         timer.step("format_response", mark);
@@ -1271,7 +1281,9 @@ async function maybeStartHttpServer(managerOverride) {
         mark = timer.step("resolve_targets", mark);
 
         const maxChars = parseMaxChars(url.searchParams.get("maxChars"), 8000);
-        const payload = await openTargetsParallel(targetUrls, maxChars, manager.config.openPageMaxParallel);
+        const payload = await runWithHangGuard("http:/extract", () =>
+          openTargetsParallel(targetUrls, maxChars, manager.config.openPageMaxParallel)
+        );
         mark = timer.step("open_targets", mark);
         const markdown = formatOpenPageResponse(payload).content[0].text;
         timer.step("format_response", mark);
@@ -1321,10 +1333,12 @@ async function maybeStartHttpServer(managerOverride) {
         };
         mark = timer.step("parse_options", mark);
 
-        const payload = await captureScreenshotsParallel(
-          targetUrls,
-          manager.config.openPageMaxParallel,
-          options
+        const payload = await runWithHangGuard("http:/screenshot", () =>
+          captureScreenshotsParallel(
+            targetUrls,
+            manager.config.openPageMaxParallel,
+            options
+          )
         );
         mark = timer.step("capture_screenshots", mark);
         await applyScreenshotStorage(payload, manager.config);
@@ -1390,6 +1404,85 @@ const manager = await getBrowserManager();
 logEvent("boot.start", { pid: process.pid });
 logBootConfig(manager.config);
 
+const HANG_TIMEOUT_CODE = "HANG_TIMEOUT";
+let shutdownInProgress = false;
+
+function createHangTimeoutError(label, timeoutMs) {
+  const error = new Error(`Operation '${label}' timed out after ${timeoutMs}ms`);
+  error.code = HANG_TIMEOUT_CODE;
+  return error;
+}
+
+async function shutdownWithExit(exitCode, context = {}) {
+  if (shutdownInProgress) return;
+  shutdownInProgress = true;
+
+  if (Object.keys(context).length) {
+    logEvent("shutdown", context);
+  }
+
+  try {
+    await manager.shutdown();
+  } catch (error) {
+    logEvent("shutdown.error", {
+      error: String(error?.message || error)
+    });
+  }
+
+  process.exit(exitCode);
+}
+
+async function runWithHangGuard(label, task) {
+  if (!manager.config.enableHangRestart) {
+    return task();
+  }
+
+  const timeoutMs = manager.config.hangRestartTimeoutMs;
+  let timeoutId;
+  const timeoutPromise = new Promise((_, reject) => {
+    timeoutId = setTimeout(() => {
+      reject(createHangTimeoutError(label, timeoutMs));
+    }, timeoutMs);
+  });
+
+  try {
+    return await Promise.race([task(), timeoutPromise]);
+  } catch (error) {
+    if (error?.code === HANG_TIMEOUT_CODE) {
+      await shutdownWithExit(1, {
+        reason: "hang_timeout",
+        label,
+        timeoutMs,
+        error: String(error?.message || error)
+      });
+      return new Promise(() => {});
+    }
+    throw error;
+  } finally {
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+    }
+  }
+}
+
+process.on("uncaughtException", async (error) => {
+  logEvent("process.uncaught_exception", {
+    error: String(error?.stack || error?.message || error)
+  });
+  if (manager.config.enableHangRestart) {
+    await shutdownWithExit(1, { reason: "uncaught_exception" });
+  }
+});
+
+process.on("unhandledRejection", async (reason) => {
+  logEvent("process.unhandled_rejection", {
+    error: String(reason?.stack || reason?.message || reason)
+  });
+  if (manager.config.enableHangRestart) {
+    await shutdownWithExit(1, { reason: "unhandled_rejection" });
+  }
+});
+
 manager.prelaunchIfConfigured().then(
   () => {
     logEvent("prelaunch.ready", {
@@ -1417,8 +1510,7 @@ if (!manager.config.enableStdioMcp && !manager.config.enableHttpMcp) {
 }
 
 async function shutdown() {
-  await manager.shutdown();
-  process.exit(0);
+  await shutdownWithExit(0, { reason: "signal" });
 }
 
 process.on("SIGINT", shutdown);

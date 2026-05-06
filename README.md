@@ -264,6 +264,8 @@ docker compose restart
 - `CHROME_PROFILE_DIR` (default: `Default`)
 - `HEADLESS` (default: `true` unless `DISPLAY` exists)
 - `BROWSER_OP_TIMEOUT_MS` (default: `60000`)
+- `ENABLE_HANG_RESTART` (default: `0`; when `1`, top-level browser operations that exceed hang timeout force process exit for container restart)
+- `HANG_RESTART_TIMEOUT_MS` (default: `120000`; max duration before forced exit when hang restart is enabled)
 - `NAV_WAIT_UNTIL` (default: `domcontentloaded`; valid: `load`, `domcontentloaded`, `networkidle0`, `networkidle2`)
 - `SEARCH_ENGINES` (default: `bing,duckduckgo,google`)
 - `PRELAUNCH_BROWSER` (default: `1`; set `0` to disable prelaunch)
@@ -309,6 +311,7 @@ If Chromium reports profile lock/in-use errors, the server automatically:
 
 - Increase `BROWSER_OP_TIMEOUT_MS` for slow pages (e.g. `120000`)
 - Change `NAV_WAIT_UNTIL` to `domcontentloaded` for dynamic pages that never reach `networkidle2`
+- For self-healing in Docker, set `ENABLE_HANG_RESTART=1`; if a top-level browser operation hangs longer than `HANG_RESTART_TIMEOUT_MS`, the process exits and Docker restart policy brings it back
 
 ### Keeping sessions logged in
 

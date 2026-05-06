@@ -6,6 +6,7 @@
   "main": "src/mcp-server.js",
   "scripts": {
     "start": "node src/mcp-server.js",
+    "bench": "node scripts/benchmark.mjs",
     "test:mcporter": "bash scripts/test-mcporter.sh",
     "docs": "typedoc src/ --out doc"
   },
