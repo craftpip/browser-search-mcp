@@ -546,10 +546,14 @@ function resolveOpenTarget(args) {
 
   if (hasUrls) {
     if (Array.isArray(args.urls) && args.urls.length) {
-      return args.urls.map((item) => {
+      const normalizedUrls = args.urls.map((item) => {
         assertString(item, "urls[]");
         return String(item).trim();
-      });
+      }).filter(Boolean);
+
+      if (normalizedUrls.length) {
+        return normalizedUrls;
+      }
     }
   }
 
@@ -567,7 +571,7 @@ function resolveOpenTarget(args) {
   }
 
   if (hasRef) {
-    if (normalizedRef !== undefined && normalizedRef !== null && String(normalizedRef).trim()) {
+    if (normalizedRef !== undefined && normalizedRef !== null && String(normalizedRef).trim() && Number(normalizedRef) > 0) {
       const ref = parsePositiveInt(normalizedRef, "ref_id");
       const remembered = linkMemoryByRef.get(ref);
       if (!remembered) {
