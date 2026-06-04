@@ -191,6 +191,68 @@ function logEvent(label, payload) {
   console.error(`[${timestamp}] ${label}${suffix}`);
 }
 
+function summarizeJsonBody(body) {
+  if (!body || typeof body !== "object") {
+    return { bodyType: typeof body, keys: [], hasParams: false };
+  }
+
+  const keys = Object.keys(body);
+  const params = body.params && typeof body.params === "object" ? body.params : null;
+  return {
+    bodyType: "object",
+    keys,
+    hasParams: Boolean(params),
+    paramsKeys: params ? Object.keys(params) : [],
+    hasArguments: Boolean(params && params.arguments && typeof params.arguments === "object")
+  };
+}
+
+function summarizeToolArgs(tool, args = {}) {
+  const base = { tool, argKeys: Object.keys(args || {}) };
+
+  if (tool === "web_search") {
+    const single = typeof args.query === "string" ? args.query.trim() : "";
+    const multi = Array.isArray(args.queries)
+      ? args.queries.map((item) => String(item || "").trim()).filter(Boolean)
+      : [];
+    const terms = [...new Set([single, ...multi].filter(Boolean))];
+    return {
+      ...base,
+      terms,
+      termCount: terms.length,
+      limit: parseSearchLimit(args.limit, 5),
+      engines: (() => {
+        const engines = parseEngineList(args.engines);
+        if (!engines.length && typeof args.engine === "string") engines.push(args.engine);
+        return engines;
+      })()
+    };
+  }
+
+  if (tool === "web_open_page" || tool === "web_page_screenshot") {
+    const urlCount = Array.isArray(args.urls)
+      ? args.urls.map((item) => String(item || "").trim()).filter(Boolean).length
+      : typeof args.url === "string" && args.url.trim()
+        ? 1
+        : 0;
+    const refCount = Array.isArray(args.ref_ids)
+      ? args.ref_ids.filter((item) => item !== undefined && item !== null && String(item).trim()).length
+      : args.ref_id !== undefined && args.ref_id !== null && String(args.ref_id).trim()
+        ? 1
+        : 0;
+    return {
+      ...base,
+      urlCount,
+      refCount,
+      maxChars: tool === "web_open_page" ? parseMaxChars(args.maxChars, 8000) : undefined,
+      format: tool === "web_page_screenshot" ? (args.format || "png") : undefined,
+      fullPage: tool === "web_page_screenshot" ? (args.fullPage === undefined ? true : Boolean(args.fullPage)) : undefined
+    };
+  }
+
+  return base;
+}
+
 function createExecutionTimer(label, context = {}) {
   const startedAtMs = performance.now();
   const steps = [];
@@ -622,13 +684,13 @@ async function mapWithConcurrency(items, concurrency, mapper) {
   return results;
 }
 
-async function openTargetsParallel(targetUrls, maxChars, maxParallel) {
+async function openTargetsParallel(targetUrls, maxChars, maxParallel, includeSeoAnalysis = false) {
   const opened = await mapWithConcurrency(
     targetUrls,
     maxParallel,
     async (targetUrl, index) => {
       try {
-        const page = await browserOpenAndExtract({ url: targetUrl, maxChars });
+        const page = await browserOpenAndExtract({ url: targetUrl, maxChars, includeSeoAnalysis });
         return {
           index,
           ok: true,
@@ -867,7 +929,7 @@ async function handleToolCall(name, args = {}) {
       engines.push(args.engine);
     }
     if (!engines.length) {
-      engines.push("google");
+      engines.push(...manager.config.searchEngines);
     }
     mark = timer.step("validate_inputs", mark);
 
@@ -910,10 +972,11 @@ async function handleToolCall(name, args = {}) {
     }
     mark = timer.step("resolve_targets", mark);
     const maxChars = parseMaxChars(args.maxChars, 8000);
+    const includeSeoAnalysis = args.includeSeoAnalysis === true;
     const manager = await getBrowserManager();
     mark = timer.step("prepare_execution", mark);
     const result = await runWithHangGuard(`mcp:${name}`, () =>
-      openTargetsParallel(targetUrls, maxChars, manager.config.openPageMaxParallel)
+      openTargetsParallel(targetUrls, maxChars, manager.config.openPageMaxParallel, includeSeoAnalysis)
     );
     mark = timer.step("open_targets", mark);
     const response = formatOpenPageResponse(result);
@@ -1038,7 +1101,11 @@ function createMcpServer() {
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args = {} } = request.params;
-    logEvent("mcp.request", { method: "tools/call", tool: name, arguments: args });
+    logEvent("mcp.request", {
+      method: "tools/call",
+      tool: name,
+      summary: summarizeToolArgs(name, args)
+    });
 
     try {
       const response = await handleToolCall(name, args);
@@ -1092,7 +1159,12 @@ async function maybeStartHttpServer(managerOverride) {
 
         if (method === "POST") {
           const body = await readJsonBody(req);
-          logEvent("http.mcp.request", { method, path: url.pathname, sessionId: sessionId || null, body });
+          logEvent("http.mcp.request", {
+            method,
+            path: url.pathname,
+            sessionId: sessionId || null,
+            summary: summarizeJsonBody(body)
+          });
 
           {
             const existingTransport = resolveTransport();
@@ -1107,7 +1179,12 @@ async function maybeStartHttpServer(managerOverride) {
 
           const response = await handleStatelessMcpPost(body);
           if (response === null) {
-            logEvent("http.mcp.notification", { method, path: url.pathname, stateless: true, body });
+            logEvent("http.mcp.notification", {
+              method,
+              path: url.pathname,
+              stateless: true,
+              summary: summarizeJsonBody(body)
+            });
             res.writeHead(204);
             res.end();
             return;
@@ -1240,7 +1317,7 @@ async function maybeStartHttpServer(managerOverride) {
           engines.push(engineParam);
         }
         if (!engines.length) {
-          engines.push("google");
+          engines.push(...manager.config.searchEngines);
         }
         mark = timer.step("parse_inputs", mark);
 

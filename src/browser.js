@@ -28,6 +28,24 @@ const ENGINE_STARTUP_URLS = {
   google: "https://www.google.com/"
 };
 
+function logBrowserEvent(label, payload) {
+  const timestamp = new Date().toISOString();
+  if (!payload || typeof payload !== "object") {
+    const suffix = payload === undefined ? "" : ` ${String(payload)}`;
+    console.error(`[${timestamp}] ${label}${suffix}`);
+    return;
+  }
+
+  const entries = Object.entries(payload).filter(([, value]) => value !== undefined);
+  if (!entries.length) {
+    console.error(`[${timestamp}] ${label}`);
+    return;
+  }
+
+  const rendered = entries.map(([key, value]) => `${key}=${typeof value === "string" ? value : JSON.stringify(value)}`);
+  console.error(`[${timestamp}] ${label} ${rendered.join(" ")}`);
+}
+
 function isLockError(error) {
   const message = String(error?.message || "").toLowerCase();
   return (
@@ -126,10 +144,57 @@ export class BrowserManager {
     const key = String(engine || "").trim().toLowerCase() || "default";
     let pool = this.engineWorkingWindows.get(key);
     if (!pool) {
-      pool = { windows: [], waiters: [] };
+      pool = { engine: key, windows: [], waiters: [] };
       this.engineWorkingWindows.set(key, pool);
     }
     return pool;
+  }
+
+  buildWindowStats(engine) {
+    const scoped = engine ? this.getEnginePool(engine) : null;
+    if (scoped) {
+      this.pruneClosedWindows(scoped);
+    }
+
+    const byEngine = {};
+    let totalOpen = 0;
+    let totalInUse = 0;
+    let totalPending = 0;
+    let totalWaiters = 0;
+
+    for (const [name, pool] of this.engineWorkingWindows.entries()) {
+      this.pruneClosedWindows(pool);
+      const open = pool.windows.length;
+      const inUse = pool.windows.filter((entry) => entry.inUse).length;
+      const pending = pool.windows.filter((entry) => entry.pending).length;
+      const waiters = pool.waiters.length;
+      byEngine[name] = { open, inUse, pending, waiters };
+      totalOpen += open;
+      totalInUse += inUse;
+      totalPending += pending;
+      totalWaiters += waiters;
+    }
+
+    return {
+      totalOpen,
+      totalInUse,
+      totalPending,
+      totalWaiters,
+      byEngine,
+      pageSlots: {
+        inUse: this.pageSlotsInUse,
+        queued: this.pageSlotWaiters.length,
+        max: this.config.maxConcurrentPageOps
+      }
+    };
+  }
+
+  logWindowEvent(label, engine, extra = {}) {
+    logBrowserEvent(label, {
+      engine,
+      ...extra,
+      stats: this.buildWindowStats()
+    });
   }
 
   pruneClosedWindows(pool) {
@@ -149,6 +214,7 @@ export class BrowserManager {
       try {
         if (idle.page && !idle.page.isClosed()) {
           await idle.page.close();
+          this.logWindowEvent("search.window.closed", pool.engine, { reason: "trim_idle", persistent: Boolean(idle.persistent) });
         }
       } catch {
         // ignore window close errors
@@ -375,6 +441,7 @@ export class BrowserManager {
             timeout: this.config.browserOpTimeoutMs
           });
         }
+        this.logWindowEvent("search.window.opened", entry.engine, { reason: "warmup", persistent: true });
       } catch (error) {
         pool.windows = pool.windows.filter((item) => item !== entry);
         throw error;
@@ -425,6 +492,7 @@ export class BrowserManager {
               timeout: this.config.browserOpTimeoutMs
             });
           }
+          this.logWindowEvent("search.window.opened", entry.engine, { reason: "on_demand", persistent: false });
           return page;
         } catch (error) {
           pool.windows = pool.windows.filter((item) => item !== entry);
@@ -450,6 +518,7 @@ export class BrowserManager {
       pool.windows = pool.windows.filter((item) => item !== entry);
       try {
         await entry.page.close();
+        this.logWindowEvent("search.window.closed", entry.engine, { reason: "release_over_min", persistent: false });
       } catch {
         // ignore window close errors
       }
@@ -533,6 +602,13 @@ export class BrowserManager {
           })
         )
       );
+
+      logBrowserEvent("search.warmup.ready", {
+        engines: this.config.searchEngines,
+        minWindowsPerEngine: this.config.searchKeepMinWorkingWindows,
+        maxWindowsPerEngine: this.config.searchMaxWorkingWindows,
+        stats: this.buildWindowStats()
+      });
     })();
 
     return this.prelaunchPromise;

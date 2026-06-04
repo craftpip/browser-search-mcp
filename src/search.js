@@ -733,16 +733,22 @@ async function submitSearchFromHomepage({ page, query, engine, config }) {
   await page.keyboard.press("Backspace");
   await input.type(query, { delay: config.humanTypingDelay });
 
-  const navPromise = page
-    .waitForNavigation({
-      waitUntil: "domcontentloaded",
-      timeout: config.browserOpTimeoutMs
-    })
-    .catch(() => null);
-
   await input.press("Enter");
-  await navPromise;
-  await waitForAnySelector(page, engineConfig.resultSelectors, config.browserOpTimeoutMs);
+
+  const settledBy = await Promise.race([
+    page
+      .waitForNavigation({
+        waitUntil: "domcontentloaded",
+        timeout: config.browserOpTimeoutMs
+      })
+      .then(() => "navigation")
+      .catch(() => null),
+    waitForAnySelector(page, engineConfig.resultSelectors, config.browserOpTimeoutMs).then(() => "results")
+  ]);
+
+  if (settledBy !== "results") {
+    await waitForAnySelector(page, engineConfig.resultSelectors, config.browserOpTimeoutMs);
+  }
 }
 
 async function runSearchEngine({ manager, query, engine, config }) {
@@ -993,40 +999,69 @@ export async function browserOpenAndExtract({ url, maxChars = 8000, includeSeoAn
 
   return manager.withPageSlot(async () => {
     const page = await manager.newPage();
+    const operationTimeoutMs = Math.max(1000, Number(manager.config.browserOpTimeoutMs) || 60000);
 
-    try {
-      await page.goto(url, {
-        waitUntil: "domcontentloaded",
-        timeout: manager.config.browserOpTimeoutMs
+    const withPageTimeout = async (label, task) => {
+      let timeoutId;
+      const timeoutPromise = new Promise((_, reject) => {
+        timeoutId = setTimeout(async () => {
+          try {
+            if (!page.isClosed()) {
+              await page.close();
+            }
+          } catch {
+            // ignore close errors during timeout handling
+          }
+          reject(new Error(`Open page step timed out (${label}) after ${operationTimeoutMs}ms`));
+        }, operationTimeoutMs);
       });
 
-      await page
-        .waitForFunction(
-          () => {
-            const container =
-              document.querySelector("main, article, [role='main'], .content, #content") || document.body;
-            if (!container) return false;
-            const text = container.innerText || "";
-            return text.replace(/\s+/g, " ").trim().length > 200;
-          },
-          { timeout: Math.min(10000, manager.config.browserOpTimeoutMs) }
-        )
-        .catch(() => null);
+      try {
+        return await Promise.race([task(), timeoutPromise]);
+      } finally {
+        if (timeoutId) {
+          clearTimeout(timeoutId);
+        }
+      }
+    };
+
+    try {
+      await withPageTimeout("goto", () =>
+        page.goto(url, {
+          waitUntil: "domcontentloaded",
+          timeout: manager.config.browserOpTimeoutMs
+        })
+      );
+
+      await withPageTimeout("wait_for_content", () =>
+        page
+          .waitForFunction(
+            () => {
+              const container =
+                document.querySelector("main, article, [role='main'], .content, #content") || document.body;
+              if (!container) return false;
+              const text = container.innerText || "";
+              return text.replace(/\s+/g, " ").trim().length > 200;
+            },
+            { timeout: Math.min(10000, manager.config.browserOpTimeoutMs) }
+          )
+          .catch(() => null)
+      );
 
       const seoSnapshot =
         includeSeoAnalysis === false
           ? null
-          : await captureSeoSnapshot(page, {
-              textLimit: Math.min(MAX_MAIN_TEXT_CHARS, Math.max(maxChars * 3, 4000)),
-              htmlLimit: Math.min(Math.max(MAX_MAIN_HTML_CHARS, maxChars * 6), 120000),
-              maxCandidates: MAX_SEO_CANDIDATES
-            });
+          : await withPageTimeout("seo_snapshot", () =>
+              captureSeoSnapshot(page, {
+                textLimit: Math.min(MAX_MAIN_TEXT_CHARS, Math.max(maxChars * 3, 4000)),
+                htmlLimit: Math.min(Math.max(MAX_MAIN_HTML_CHARS, maxChars * 6), 120000),
+                maxCandidates: MAX_SEO_CANDIDATES
+              })
+            );
 
-      const [html, resolvedUrl, pageTitle] = await Promise.all([
-        page.content(),
-        Promise.resolve(page.url()),
-        page.title()
-      ]);
+      const [html, resolvedUrl, pageTitle] = await withPageTimeout("serialize_html", () =>
+        Promise.all([page.content(), Promise.resolve(page.url()), page.title()])
+      );
 
       const extracted = extractTextFromHtml({
         html,
@@ -1052,7 +1087,9 @@ export async function browserOpenAndExtract({ url, maxChars = 8000, includeSeoAn
         ...(seoAnalysis ? { seo: seoAnalysis } : {})
       };
     } finally {
-      await page.close();
+      if (!page.isClosed()) {
+        await page.close();
+      }
     }
   });
 }
