@@ -1,8 +1,10 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { spawn } from "node:child_process";
+import http from "node:http";
 import puppeteer from "puppeteer-core";
-import { loadConfig } from "./config.js";
+import { loadConfig, findLightpandaPath } from "./config.js";
 
 const LOCK_FILES = ["SingletonLock", "SingletonCookie", "SingletonSocket"];
 const CLONE_EXCLUDE_NAMES = new Set([
@@ -25,7 +27,9 @@ const MONITOR_HEIGHT = 1080;
 const ENGINE_STARTUP_URLS = {
   bing: "https://www.bing.com/",
   duckduckgo: "https://duckduckgo.com/",
-  google: "https://www.google.com/"
+  duckduckgo_chromium: "https://duckduckgo.com/",
+  google: "https://www.google.com/",
+  mojeek: "https://www.mojeek.com/"
 };
 
 function logBrowserEvent(label, payload) {
@@ -75,14 +79,23 @@ async function removeIfExists(targetPath) {
 export class BrowserManager {
   constructor(config) {
     this.config = config;
+
+    // Chromium
     this.browser = null;
     this.launching = null;
     this.tempProfileDir = null;
+    this.keepAlivePage = null;
+    this.prelaunchPromise = null;
+
+    // Lightpanda
+    this.lightpandaProcess = null;
+    this.lightpandaBrowser = null;
+    this.lightpandaLaunching = null;
+
+    // Shared
     this.engineWorkingWindows = new Map();
     this.pageSlotsInUse = 0;
     this.pageSlotWaiters = [];
-    this.keepAlivePage = null;
-    this.prelaunchPromise = null;
   }
 
   async ensureKeepAlivePage(browser) {
@@ -295,9 +308,11 @@ export class BrowserManager {
 
     browser.on("disconnected", () => {
       this.browser = null;
-      this.engineWorkingWindows.clear();
-      this.keepAlivePage = null;
-      this.prelaunchPromise = null;
+      if (this.config.defaultBackend === "chromium") {
+        this.engineWorkingWindows.clear();
+        this.keepAlivePage = null;
+        this.prelaunchPromise = null;
+      }
     });
 
     return browser;
@@ -395,7 +410,228 @@ export class BrowserManager {
     throw lastError || new Error("Browser target is not found");
   }
 
-  async newPage() {
+  // ---- Lightpanda backend ----
+
+  async _spawnLightpanda() {
+    const binaryPath = this.config.lightpandaPath || (await findLightpandaPath());
+    if (!binaryPath) return null;
+
+    const port = this.config.lightpandaPort;
+
+    return new Promise((resolve, reject) => {
+      const proc = spawn(binaryPath, ["serve", "--port", String(port)], {
+        stdio: ["ignore", "pipe", "pipe"]
+      });
+
+      let started = false;
+
+      proc.on("error", (err) => {
+        if (!started) reject(err);
+      });
+
+      proc.stderr.on("data", () => {
+        if (!started) {
+          started = true;
+          resolve(proc);
+        }
+      });
+
+      const poll = () => {
+        const req = http.get(`http://127.0.0.1:${port}/json/version`, (res) => {
+          res.resume();
+          if (!started) {
+            started = true;
+            resolve(proc);
+          }
+        });
+        req.on("error", () => {
+          if (!started) setTimeout(poll, 100);
+        });
+        req.end();
+      };
+      setTimeout(poll, 300);
+
+      setTimeout(() => {
+        if (!started) {
+          reject(new Error("Lightpanda failed to start within 15s"));
+        }
+      }, 15000);
+    });
+  }
+
+  async getLightpandaBrowser() {
+    if (this.lightpandaBrowser?.connected) return this.lightpandaBrowser;
+    if (this.lightpandaLaunching) return this.lightpandaLaunching;
+
+    this.lightpandaLaunching = this._connectLightpanda();
+    try {
+      this.lightpandaBrowser = await this.lightpandaLaunching;
+      return this.lightpandaBrowser;
+    } finally {
+      this.lightpandaLaunching = null;
+    }
+  }
+
+  async _connectLightpanda() {
+    let processHandle;
+    try {
+      processHandle = await this._spawnLightpanda();
+    } catch (error) {
+      logBrowserEvent("lightpanda.spawn_failed", { error: String(error?.message || error) });
+      return null;
+    }
+
+    if (!processHandle) return null;
+
+    this.lightpandaProcess = processHandle;
+    processHandle.on("exit", (code) => {
+      logBrowserEvent("lightpanda.exit", { code });
+      this.lightpandaProcess = null;
+      this.lightpandaBrowser = null;
+    });
+
+    const browser = await puppeteer.connect({
+      browserWSEndpoint: `ws://127.0.0.1:${this.config.lightpandaPort}`,
+      defaultViewport: { width: MONITOR_WIDTH, height: MONITOR_HEIGHT }
+    });
+
+    this.lightpandaBrowser = browser;
+    browser.on("disconnected", () => {
+      this.lightpandaBrowser = null;
+    });
+
+    return browser;
+  }
+
+  async _newLightpandaPage() {
+    const browser = await this.getLightpandaBrowser();
+    if (!browser) {
+      return this._newChromiumPage();
+    }
+
+    const page = await browser.newPage();
+    await page.setUserAgent(this.config.userAgent);
+    page.setDefaultNavigationTimeout(this.config.browserOpTimeoutMs);
+    page.setDefaultTimeout(this.config.browserOpTimeoutMs);
+
+    // Inject stealth patches to avoid bot detection.
+    // These run before any page scripts on every navigation.
+    await page.evaluateOnNewDocument(() => {
+      // Override navigator.webdriver
+      Object.defineProperty(navigator, 'webdriver', {
+        get: () => false,
+        configurable: true,
+      });
+
+      // Spoof navigator.plugins
+      const makePlugin = (name, filename, description) => {
+        const plugin = {
+          name,
+          filename,
+          description,
+          length: 0,
+          item: () => null,
+          namedItem: () => null,
+          [Symbol.iterator]: function* () {},
+        };
+        return plugin;
+      };
+      const plugins = [
+        makePlugin('Chrome PDF Plugin', 'internal-pdf-viewer', 'Portable Document Format'),
+        makePlugin('Chrome PDF Viewer', 'mhjfbmdgcfjbbpaeojofohoefgiehjai', ''),
+        makePlugin('Native Client', 'internal-nacl-plugin', ''),
+      ];
+      const pluginArray = Object.assign(plugins.slice(), {
+        item: (i) => plugins[i] || null,
+        namedItem: (n) => plugins.find((p) => p.name === n) || null,
+        refresh: () => {},
+        length: plugins.length,
+        [Symbol.iterator]: function* () { yield* plugins; },
+      });
+      Object.defineProperty(navigator, 'plugins', {
+        get: () => pluginArray,
+        configurable: true,
+      });
+
+      // Spoof navigator.mimeTypes
+      const mimeTypes = [
+        { type: 'application/pdf', suffixes: 'pdf', description: 'Portable Document Format' },
+        { type: 'text/pdf', suffixes: 'pdf', description: 'Portable Document Format' },
+      ];
+      const mimeTypeArray = Object.assign(mimeTypes.slice(), {
+        item: (i) => mimeTypes[i] || null,
+        namedItem: (n) => mimeTypes.find((m) => m.type === n) || null,
+        length: mimeTypes.length,
+        [Symbol.iterator]: function* () { yield* mimeTypes; },
+      });
+      Object.defineProperty(navigator, 'mimeTypes', {
+        get: () => mimeTypeArray,
+        configurable: true,
+      });
+
+      // Spoof navigator.languages
+      Object.defineProperty(navigator, 'languages', {
+        get: () => ['en-US', 'en'],
+        configurable: true,
+      });
+
+      // Spoof navigator.platform
+      Object.defineProperty(navigator, 'platform', {
+        get: () => 'Linux x86_64',
+        configurable: true,
+      });
+
+      // Spoof navigator.hardwareConcurrency
+      Object.defineProperty(navigator, 'hardwareConcurrency', {
+        get: () => 8,
+        configurable: true,
+      });
+
+      // Spoof navigator.deviceMemory
+      Object.defineProperty(navigator, 'deviceMemory', {
+        get: () => 8,
+        configurable: true,
+      });
+
+      // Add window.chrome object
+      if (!window.chrome) {
+        window.chrome = {
+          runtime: {},
+          loadTimes: () => null,
+          csi: () => null,
+          app: {},
+        };
+      }
+
+      // Override navigator.connection to include effectiveType
+      if (navigator.connection) {
+        Object.defineProperty(navigator.connection, 'effectiveType', {
+          get: () => '4g',
+          configurable: true,
+        });
+      }
+
+      // Remove webdriver from navigator
+      if (navigator.hasOwnProperty('webdriver')) {
+        delete navigator.webdriver;
+      }
+
+      // Hide headless chrome by overriding permissions
+      const origQuery = navigator.permissions?.query;
+      if (origQuery) {
+        navigator.permissions.query = (params) => {
+          if (params?.name === 'notifications') {
+            return Promise.resolve({ state: 'denied', onchange: null });
+          }
+          return origQuery(params);
+        };
+      }
+    });
+
+    return page;
+  }
+
+  async _newChromiumPage() {
     const browser = await this.getBrowser();
     await this.ensureKeepAlivePage(browser);
     const page = await this.createWindowPage(browser);
@@ -406,12 +642,36 @@ export class BrowserManager {
     return page;
   }
 
+  async newPage(options = {}) {
+    const engine = (options && options.engine) || "";
+    const backend = (options && options.backend) || this.config.defaultBackend;
+    // Chromium-only routes handle JS-heavy/CAPTCHA-prone engines.
+    const needsChromium = ["duckduckgo_chromium", "google"].includes(engine.toLowerCase());
+    if (needsChromium) {
+      return this._newChromiumPage();
+    }
+    return backend === "chromium" ? this._newChromiumPage() : this._newLightpandaPage();
+  }
+
+  _poolEngine(engine) {
+    // Chromium routes use per-engine pools; Lightpanda routes share one pool.
+    if (["duckduckgo_chromium", "google"].includes((engine || "").toLowerCase())) return engine;
+    return this.config.defaultBackend !== "chromium" ? "_shared" : engine;
+  }
+
+  _poolMaxWindows(poolEngine) {
+    if (poolEngine === "_shared" && this.config.defaultBackend !== "chromium") return 1;
+    return this.config.searchMaxWorkingWindows;
+  }
+
   async ensureMinWorkingWindows(engine, { startupUrl, waitUntil = "domcontentloaded" } = {}) {
+    const needsChromium = ["duckduckgo_chromium", "google"].includes((engine || "").toLowerCase());
+    if (this.config.defaultBackend !== "chromium" && !needsChromium) return;
     const pool = this.getEnginePool(engine);
     this.pruneClosedWindows(pool);
 
     const minWindows = this.config.searchKeepMinWorkingWindows;
-    const maxWindows = this.config.searchMaxWorkingWindows;
+    const maxWindows = this._poolMaxWindows(engine);
     const target = Math.min(minWindows, maxWindows);
     const missing = Math.max(0, target - pool.windows.length);
 
@@ -426,7 +686,7 @@ export class BrowserManager {
       pool.windows.push(entry);
 
       try {
-        const page = await this.newPage();
+        const page = await this.newPage({ engine });
         entry.page = page;
         entry.pending = false;
 
@@ -456,8 +716,9 @@ export class BrowserManager {
       });
     }
 
-    await this.ensureMinWorkingWindows(engine, { startupUrl, waitUntil });
-    const pool = this.getEnginePool(engine);
+    const poolEngine = this._poolEngine(engine);
+    await this.ensureMinWorkingWindows(poolEngine, { startupUrl, waitUntil });
+    const pool = this.getEnginePool(poolEngine);
 
     while (true) {
       this.pruneClosedWindows(pool);
@@ -467,17 +728,17 @@ export class BrowserManager {
         return idle.page;
       }
 
-      if (pool.windows.length < this.config.searchMaxWorkingWindows) {
+      if (pool.windows.length < this._poolMaxWindows(poolEngine)) {
         const entry = {
           page: null,
           inUse: true,
           persistent: false,
           pending: true,
-          engine: String(engine || "").trim().toLowerCase() || "default"
+          engine: poolEngine
         };
         pool.windows.push(entry);
         try {
-          const page = await this.newPage();
+          const page = await this.newPage({ engine: poolEngine });
           entry.page = page;
           entry.pending = false;
 
@@ -507,14 +768,15 @@ export class BrowserManager {
   }
 
   async releaseSearchWindow(engine, page) {
-    const pool = this.getEnginePool(engine);
+    const poolEngine = this._poolEngine(engine);
+    const pool = this.getEnginePool(poolEngine);
     this.pruneClosedWindows(pool);
     const entry = pool.windows.find((item) => item.page === page);
     if (!entry) return;
 
     if (entry.pending || !entry.page || entry.page.isClosed()) {
       pool.windows = pool.windows.filter((item) => item !== entry);
-    } else if (!entry.persistent && pool.windows.length > this.config.searchKeepMinWorkingWindows) {
+    } else if (!entry.persistent && pool.windows.length > Math.max(this.config.searchKeepMinWorkingWindows, 1)) {
       pool.windows = pool.windows.filter((item) => item !== entry);
       try {
         await entry.page.close();
@@ -530,7 +792,7 @@ export class BrowserManager {
     }
 
     if (!pool.waiters.length) {
-      await this.trimIdleWindows(pool, this.config.searchKeepMinWorkingWindows);
+      await this.trimIdleWindows(pool, Math.max(this.config.searchKeepMinWorkingWindows, 1));
     }
 
     const next = pool.waiters.shift();
@@ -555,7 +817,9 @@ export class BrowserManager {
 
     return {
       ok: true,
+      backend: this.config.defaultBackend,
       browserConnected: Boolean(this.browser?.connected),
+      lightpandaConnected: Boolean(this.lightpandaBrowser?.connected),
       headless: this.config.headless,
       userDataDir: this.config.chromeUserDataDir,
       profileDir: this.config.chromeProfileDir,
@@ -574,6 +838,11 @@ export class BrowserManager {
 
   async prelaunchIfConfigured() {
     if (!this.config.prelaunchBrowser) return;
+
+    // Always pre-launch Chromium so screenshots are fast
+    this._prelaunchChromium().catch(() => {});
+
+    if (this.config.defaultBackend !== "chromium") return;
     if (this.prelaunchPromise) {
       return this.prelaunchPromise;
     }
@@ -614,7 +883,14 @@ export class BrowserManager {
     return this.prelaunchPromise;
   }
 
+  async _prelaunchChromium() {
+    const browser = await this.getBrowser();
+    await this.ensureKeepAlivePage(browser);
+    logBrowserEvent("chromium.prelaunch.ready", { reason: "screenshot_backend" });
+  }
+
   async shutdown() {
+    // Chromium shutdown
     if (this.browser) {
       try {
         await this.browser.close();
@@ -631,6 +907,25 @@ export class BrowserManager {
         // ignore temp cleanup errors
       }
       this.tempProfileDir = null;
+    }
+
+    // Lightpanda shutdown
+    if (this.lightpandaBrowser) {
+      try {
+        await this.lightpandaBrowser.close();
+      } catch {
+        // ignore close errors on shutdown
+      }
+      this.lightpandaBrowser = null;
+    }
+
+    if (this.lightpandaProcess) {
+      try {
+        this.lightpandaProcess.kill();
+      } catch {
+        // ignore process kill errors
+      }
+      this.lightpandaProcess = null;
     }
 
     this.engineWorkingWindows.clear();

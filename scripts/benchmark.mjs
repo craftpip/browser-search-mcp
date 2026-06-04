@@ -93,7 +93,7 @@ async function main() {
   const rows = [];
 
   try {
-    await manager.prelaunch().catch(() => null);
+    await manager.prelaunchIfConfigured().catch(() => null);
 
     let firstResultUrl = null;
     const searchTask = async () => {

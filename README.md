@@ -70,7 +70,7 @@ Example MCP client config (stdio) using this project directory:
         "CHROME_USER_DATA_DIR": "/tmp/chrome-mcp-profile",
         "CHROME_PROFILE_DIR": "Default",
         "PRELAUNCH_BROWSER": "1",
-        "SEARCH_ENGINES": "bing,duckduckgo,google",
+        "SEARCH_ENGINES": "duckduckgo,bing,mojeek,google,duckduckgo_chromium",
         "BROWSER_OP_TIMEOUT_MS": "60000",
         "NAV_WAIT_UNTIL": "domcontentloaded"
       }
@@ -104,7 +104,7 @@ Use this section as the tool contract for LLM/agent planning and calling.
 - Input:
   - `query` string (single query) OR `queries` string[] (multiple variants)
   - optional `limit` number (default `5`)
-  - optional `engine` (`bing` | `duckduckgo` | `google`)
+  - optional `engine` (`duckduckgo` | `bing` | `mojeek` | `google` | `duckduckgo_chromium`)
   - optional `engines` array of engines
 - Output highlights:
   - `results[]` contains `title`, `snippet`, `llmText`
@@ -267,7 +267,8 @@ docker compose restart
 - `ENABLE_HANG_RESTART` (default: `0`; when `1`, top-level browser operations that exceed hang timeout force process exit for container restart)
 - `HANG_RESTART_TIMEOUT_MS` (default: `120000`; max duration before forced exit when hang restart is enabled)
 - `NAV_WAIT_UNTIL` (default: `domcontentloaded`; valid: `load`, `domcontentloaded`, `networkidle0`, `networkidle2`)
-- `SEARCH_ENGINES` (default: `bing,duckduckgo,google`)
+- `SEARCH_ENGINES` (default: `duckduckgo,bing,mojeek,google,duckduckgo_chromium`)
+- `SEARCH_ROUTE_CIRCUIT_OPEN_MS` (default: `300000`) route cooldown after a failed engine/backend route
 - `PRELAUNCH_BROWSER` (default: `1`; set `0` to disable prelaunch)
 - `STARTUP_URL` (default: `about:blank`; opened at prelaunch)
 - `ENABLE_VNC` (default: `0`, set `1` to enable Xvfb + VNC + noVNC)

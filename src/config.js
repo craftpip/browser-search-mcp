@@ -12,7 +12,7 @@ const WAIT_UNTIL_VALUES = new Set([
   "networkidle2"
 ]);
 
-const SEARCH_ENGINE_VALUES = new Set(["bing", "duckduckgo", "google"]);
+const SEARCH_ENGINE_VALUES = new Set(["bing", "duckduckgo", "duckduckgo_chromium", "google", "mojeek"]);
 
 function parseBoolean(value, fallback) {
   if (value === undefined || value === null || value === "") return fallback;
@@ -95,6 +95,32 @@ export async function resolveChromePath() {
   );
 }
 
+export async function findLightpandaPath() {
+  const fromEnv = process.env.LIGHTPANDA_PATH;
+  if (fromEnv && (await canAccess(fromEnv))) {
+    return fromEnv;
+  }
+
+  const knownPaths = [
+    "/usr/local/bin/lightpanda",
+    "/usr/bin/lightpanda"
+  ];
+
+  for (const candidate of knownPaths) {
+    if (await canAccess(candidate)) {
+      return candidate;
+    }
+  }
+
+  const pathCandidates = ["lightpanda", "stealthpanda"];
+  for (const candidate of pathCandidates) {
+    const resolved = await findExecutableInPath(candidate);
+    if (resolved) return resolved;
+  }
+
+  return null;
+}
+
 const headlessDefault = !process.env.DISPLAY;
 
 export async function loadConfig() {
@@ -115,11 +141,15 @@ export async function loadConfig() {
   );
 
   const chromePath = await resolveChromePath();
+  const lightpandaPath = await findLightpandaPath();
 
   return {
     chromePath,
     chromeUserDataDir: process.env.CHROME_USER_DATA_DIR || "/data/chrome",
     chromeProfileDir: process.env.CHROME_PROFILE_DIR || "Default",
+    lightpandaPath,
+    lightpandaPort: parseNumber(process.env.LIGHTPANDA_PORT, 9222),
+    defaultBackend: (process.env.BROWSER_BACKEND || "lightpanda").toLowerCase() === "chromium" ? "chromium" : "lightpanda",
     browserOpTimeoutMs: parseNumber(process.env.BROWSER_OP_TIMEOUT_MS, 60000),
     navWaitUntil,
     headless: parseBoolean(process.env.HEADLESS, headlessDefault),
@@ -135,6 +165,7 @@ export async function loadConfig() {
     screenshotPathPrefix: screenshotPathPrefix.trim() || null,
     searchKeepMinWorkingWindows,
     searchMaxWorkingWindows,
+    searchRouteCircuitOpenMs: parseNumber(process.env.SEARCH_ROUTE_CIRCUIT_OPEN_MS, 300000),
     openPageMaxParallel: Math.max(1, Math.min(20, parseInteger(process.env.OPEN_PAGE_MAX_PARALLEL, 6))),
     maxConcurrentPageOps: Math.max(1, Math.min(30, parseInteger(process.env.MAX_CONCURRENT_PAGE_OPS, 30))),
     humanTypingDelay: Math.max(0, Math.min(500, parseInteger(process.env.HUMAN_TYPING_DELAY, 15))),
@@ -142,6 +173,6 @@ export async function loadConfig() {
     enableHangRestart: parseBoolean(process.env.ENABLE_HANG_RESTART, false),
     hangRestartTimeoutMs: parseNumber(process.env.HANG_RESTART_TIMEOUT_MS, 120000),
     startupUrl: process.env.STARTUP_URL || "about:blank",
-    searchEngines: parseEngines(process.env.SEARCH_ENGINES, ["bing", "duckduckgo", "google"])
+    searchEngines: parseEngines(process.env.SEARCH_ENGINES, ["duckduckgo", "bing", "mojeek", "google", "duckduckgo_chromium"])
   };
 }

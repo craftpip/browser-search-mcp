@@ -14,10 +14,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     novnc \
     python3-websockify \
     ca-certificates \
+    curl \
     fonts-dejavu \
     fonts-liberation \
     fonts-noto-color-emoji \
     && rm -rf /var/lib/apt/lists/*
+
+# Install Lightpanda nightly build
+RUN curl -fsSL "https://github.com/lightpanda-io/browser/releases/download/nightly/lightpanda-x86_64-linux" -o /usr/local/bin/lightpanda && \
+    chmod +x /usr/local/bin/lightpanda
 
 WORKDIR /app
 

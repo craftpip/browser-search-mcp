@@ -12,7 +12,7 @@ import {
   isInitializeRequest
 } from "@modelcontextprotocol/sdk/types.js";
 import { getBrowserManager } from "./browser.js";
-import { browserOpenAndExtract, browserSearch, browserCaptureScreenshot } from "./search.js";
+import { browserOpenAndExtract, browserSearch, browserCaptureScreenshot, getSearchBackendHealth } from "./search.js";
 
 const linkMemoryByRef = new Map();
 const linkMemoryByUrl = new Map();
@@ -288,9 +288,12 @@ function logBootConfig(config) {
     enableScreenshotDownloadLink: config.enableScreenshotDownloadLink,
     enableScreenshotPath: Boolean(config.screenshotPathPrefix),
     screenshotPathDisplay: config.screenshotPathPrefix || null,
+    backend: config.defaultBackend,
     chromePath: config.chromePath,
     chromeUserDataDir: config.chromeUserDataDir,
     chromeProfileDir: config.chromeProfileDir,
+    lightpandaPath: config.lightpandaPath,
+    lightpandaPort: config.lightpandaPort,
     headless: config.headless,
     navWaitUntil: config.navWaitUntil,
     browserOpTimeoutMs: config.browserOpTimeoutMs,
@@ -299,6 +302,7 @@ function logBootConfig(config) {
     searchEngines: config.searchEngines,
     searchKeepMinWorkingWindows: config.searchKeepMinWorkingWindows,
     searchMaxWorkingWindows: config.searchMaxWorkingWindows,
+    searchRouteCircuitOpenMs: config.searchRouteCircuitOpenMs,
     openPageMaxParallel: config.openPageMaxParallel,
     maxConcurrentPageOps: config.maxConcurrentPageOps,
     enableHangRestart: config.enableHangRestart,
@@ -799,7 +803,7 @@ function getToolsListResponse() {
       {
         name: "web_search",
         description:
-          "Search the web for any user request and return ranked results with numeric result ids. Use this for general research, fact lookup, docs, tutorials, comparisons, news, and discovery before opening pages.",
+          "Search the web for any user request and return ranked results with numeric result ids. Engine selection is smart by default: do not specify engine/engines unless you specifically need a particular search engine. Use this for general research, fact lookup, docs, tutorials, comparisons, news, and discovery before opening pages.",
         inputSchema: {
           type: "object",
           properties: {
@@ -814,14 +818,14 @@ function getToolsListResponse() {
               type: "array",
               items: {
                 type: "string",
-                enum: ["bing", "duckduckgo", "google"]
+                enum: ["duckduckgo", "bing", "mojeek", "google", "duckduckgo_chromium"]
               },
-              description: "Search engines to run in parallel"
+              description: "Specific search engines to run. Omit this unless you specifically require particular engines; by default, search uses the smart fallback chain."
             },
             engine: {
               type: "string",
-              enum: ["bing", "duckduckgo", "google"],
-              default: "bing"
+              enum: ["duckduckgo", "bing", "mojeek", "google", "duckduckgo_chromium"],
+              description: "Specific search engine to run. Omit this unless you specifically require one engine; by default, search uses the smart fallback chain."
             }
           },
           description: "Provide query (string) or queries (string[]). Use queries for multiple search variations.",
@@ -928,9 +932,6 @@ async function handleToolCall(name, args = {}) {
     if (!engines.length && typeof args.engine === "string") {
       engines.push(args.engine);
     }
-    if (!engines.length) {
-      engines.push(...manager.config.searchEngines);
-    }
     mark = timer.step("validate_inputs", mark);
 
     const results = await runWithHangGuard(`mcp:${name}`, () =>
@@ -938,7 +939,7 @@ async function handleToolCall(name, args = {}) {
         query: args.query,
         queries,
         limit,
-        engines
+        ...(engines.length ? { engines } : {})
       })
     );
     mark = timer.step("browser_search", mark);
@@ -1267,7 +1268,10 @@ async function maybeStartHttpServer(managerOverride) {
       }
 
       if (url.pathname === "/" || url.pathname === "/health") {
-        const health = await manager.getHealth();
+        const health = {
+          ...(await manager.getHealth()),
+          searchRouteCircuitBreakers: getSearchBackendHealth()
+        };
         logEvent("http.request", { method, path: url.pathname });
         logEvent("http.response", { method, path: url.pathname, result: health });
         sendJson(res, 200, health);
@@ -1316,13 +1320,10 @@ async function maybeStartHttpServer(managerOverride) {
         if (!engines.length && engineParam) {
           engines.push(engineParam);
         }
-        if (!engines.length) {
-          engines.push(...manager.config.searchEngines);
-        }
         mark = timer.step("parse_inputs", mark);
 
         const payload = decorateSearchPayload(
-          await runWithHangGuard("http:/search", () => browserSearch({ query, queries, limit, engines }))
+          await runWithHangGuard("http:/search", () => browserSearch({ query, queries, limit, ...(engines.length ? { engines } : {}) }))
         );
         mark = timer.step("browser_search", mark);
         const markdown = formatSearchMarkdown(payload);
