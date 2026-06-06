@@ -818,13 +818,13 @@ function getToolsListResponse() {
               type: "array",
               items: {
                 type: "string",
-                enum: ["duckduckgo", "bing", "mojeek", "google", "duckduckgo_chromium"]
+                enum: ["duckduckgo_api", "bing_lp", "mojeek_lp", "google_ch", "duckduckgo_ch"]
               },
               description: "Specific search engines to run. Omit this unless you specifically require particular engines; by default, search uses the smart fallback chain."
             },
             engine: {
               type: "string",
-              enum: ["duckduckgo", "bing", "mojeek", "google", "duckduckgo_chromium"],
+              enum: ["duckduckgo_api", "bing_lp", "mojeek_lp", "google_ch", "duckduckgo_ch"],
               description: "Specific search engine to run. Omit this unless you specifically require one engine; by default, search uses the smart fallback chain."
             }
           },

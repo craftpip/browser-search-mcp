@@ -8,7 +8,7 @@ const LIMIT = parseInt(process.env.BENCH_LIMIT || "5", 10);
 const ITERATIONS = parseInt(process.env.BENCH_ITERATIONS || "1", 10);
 const WARMUP = parseInt(process.env.BENCH_WARMUP || "0", 10);
 const UNIQUE_QUERIES = process.env.BENCH_UNIQUE !== "0";
-const ENGINE = process.env.BENCH_ENGINE || ""; // single engine test: duckduckgo, bing, mojeek, google, or duckduckgo_chromium
+const ENGINE = process.env.BENCH_ENGINE || ""; // single engine test: duckduckgo_api, bing_lp, mojeek_lp, google_ch, or duckduckgo_ch
 
 function round(v) { return Math.round(v * 100) / 100; }
 
@@ -54,7 +54,7 @@ async function main() {
 
   await client.connect(transport);
 
-  const engines = ENGINE ? [ENGINE] : ["duckduckgo", "bing", "mojeek", "google", "duckduckgo_chromium"];
+  const engines = ENGINE ? [ENGINE] : ["duckduckgo_api", "bing_lp", "mojeek_lp", "google_ch", "duckduckgo_ch"];
 
   function makeQuery(run) {
     return UNIQUE_QUERIES ? `${QUERY} ${run} ${Date.now()}` : QUERY;

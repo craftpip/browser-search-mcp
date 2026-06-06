@@ -32,7 +32,7 @@ services:
       NAV_WAIT_UNTIL: ${NAV_WAIT_UNTIL:-domcontentloaded}
       PRELAUNCH_BROWSER: ${PRELAUNCH_BROWSER:-1}
       STARTUP_URL: ${STARTUP_URL:-about:blank}
-      SEARCH_ENGINES: ${SEARCH_ENGINES:-duckduckgo,bing,mojeek,google,duckduckgo_chromium}
+      SEARCH_ENGINES: ${SEARCH_ENGINES:-duckduckgo_api,bing_lp,mojeek_lp,google_ch,duckduckgo_ch}
       SEARCH_ROUTE_CIRCUIT_OPEN_MS: ${SEARCH_ROUTE_CIRCUIT_OPEN_MS:-300000}
       SEARCH_KEEP_MIN_WORKING_WINDOWS: ${SEARCH_KEEP_MIN_WORKING_WINDOWS:-2}
       SEARCH_MAX_WORKING_WINDOWS: ${SEARCH_MAX_WORKING_WINDOWS:-4}

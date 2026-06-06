@@ -50,7 +50,7 @@ node -e '
 ' "$LIST_JSON"
 
 echo "[mcporter-test] calling web_search"
-CALL_JSON="$(npx mcporter call "$SERVER_NAME.web_search" query='mcp protocol' limit=1 engine=duckduckgo --config "$CONFIG_PATH" --output json)"
+CALL_JSON="$(npx mcporter call "$SERVER_NAME.web_search" query='mcp protocol' limit=1 engine=duckduckgo_api --config "$CONFIG_PATH" --output json)"
 node -e '
   const payload = JSON.parse(process.argv[1]);
   const content = payload.content || [];

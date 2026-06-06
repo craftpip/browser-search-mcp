@@ -12,7 +12,7 @@ const WAIT_UNTIL_VALUES = new Set([
   "networkidle2"
 ]);
 
-const SEARCH_ENGINE_VALUES = new Set(["bing", "duckduckgo", "duckduckgo_chromium", "google", "mojeek"]);
+const SEARCH_ENGINE_VALUES = new Set(["bing_lp", "duckduckgo_api", "duckduckgo_ch", "google_ch", "mojeek_lp"]);
 
 function parseBoolean(value, fallback) {
   if (value === undefined || value === null || value === "") return fallback;
@@ -173,6 +173,6 @@ export async function loadConfig() {
     enableHangRestart: parseBoolean(process.env.ENABLE_HANG_RESTART, false),
     hangRestartTimeoutMs: parseNumber(process.env.HANG_RESTART_TIMEOUT_MS, 120000),
     startupUrl: process.env.STARTUP_URL || "about:blank",
-    searchEngines: parseEngines(process.env.SEARCH_ENGINES, ["duckduckgo", "bing", "mojeek", "google", "duckduckgo_chromium"])
+    searchEngines: parseEngines(process.env.SEARCH_ENGINES, ["duckduckgo_api", "bing_lp", "mojeek_lp", "google_ch", "duckduckgo_ch"])
   };
 }

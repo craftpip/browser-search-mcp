@@ -25,11 +25,11 @@ const CLONE_EXCLUDE_DIRS = new Set([
 const MONITOR_WIDTH = 1920;
 const MONITOR_HEIGHT = 1080;
 const ENGINE_STARTUP_URLS = {
-  bing: "https://www.bing.com/",
-  duckduckgo: "https://duckduckgo.com/",
-  duckduckgo_chromium: "https://duckduckgo.com/",
-  google: "https://www.google.com/",
-  mojeek: "https://www.mojeek.com/"
+  bing_lp: "https://www.bing.com/",
+  duckduckgo_api: "https://duckduckgo.com/",
+  duckduckgo_ch: "https://duckduckgo.com/",
+  google_ch: "https://www.google.com/",
+  mojeek_lp: "https://www.mojeek.com/"
 };
 
 function logBrowserEvent(label, payload) {
@@ -646,7 +646,7 @@ export class BrowserManager {
     const engine = (options && options.engine) || "";
     const backend = (options && options.backend) || this.config.defaultBackend;
     // Chromium-only routes handle JS-heavy/CAPTCHA-prone engines.
-    const needsChromium = ["duckduckgo_chromium", "google"].includes(engine.toLowerCase());
+    const needsChromium = ["duckduckgo_ch", "google_ch"].includes(engine.toLowerCase());
     if (needsChromium) {
       return this._newChromiumPage();
     }
@@ -655,7 +655,7 @@ export class BrowserManager {
 
   _poolEngine(engine) {
     // Chromium routes use per-engine pools; Lightpanda routes share one pool.
-    if (["duckduckgo_chromium", "google"].includes((engine || "").toLowerCase())) return engine;
+    if (["duckduckgo_ch", "google_ch"].includes((engine || "").toLowerCase())) return engine;
     return this.config.defaultBackend !== "chromium" ? "_shared" : engine;
   }
 
@@ -665,7 +665,7 @@ export class BrowserManager {
   }
 
   async ensureMinWorkingWindows(engine, { startupUrl, waitUntil = "domcontentloaded" } = {}) {
-    const needsChromium = ["duckduckgo_chromium", "google"].includes((engine || "").toLowerCase());
+    const needsChromium = ["duckduckgo_ch", "google_ch"].includes((engine || "").toLowerCase());
     if (this.config.defaultBackend !== "chromium" && !needsChromium) return;
     const pool = this.getEnginePool(engine);
     this.pruneClosedWindows(pool);

@@ -3,22 +3,22 @@ import { JSDOM } from "jsdom";
 import { Readability } from "@mozilla/readability";
 import { performance } from "node:perf_hooks";
 
-const SUPPORTED_ENGINES = new Set(["bing", "duckduckgo", "duckduckgo_chromium", "google", "mojeek"]);
+const SUPPORTED_ENGINES = new Set(["bing_lp", "duckduckgo_api", "duckduckgo_ch", "google_ch", "mojeek_lp"]);
 const ENGINE_BACKENDS = {
-  duckduckgo: "http",
-  bing: "lightpanda",
-  mojeek: "lightpanda",
-  google: "chromium",
-  duckduckgo_chromium: "chromium"
+  duckduckgo_api: "http",
+  bing_lp: "lightpanda",
+  mojeek_lp: "lightpanda",
+  google_ch: "chromium",
+  duckduckgo_ch: "chromium"
 };
 const DEFAULT_FALLBACK_GROUPS = [
-  ["duckduckgo"],
-  ["bing", "mojeek"],
-  ["google", "duckduckgo_chromium"]
+  ["duckduckgo_api"],
+  ["bing_lp", "mojeek_lp"],
+  ["google_ch", "duckduckgo_ch"]
 ];
 const routeCircuitState = new Map();
 const ENGINE_PAGE_CONFIG = {
-  duckduckgo_chromium: {
+  duckduckgo_ch: {
     homeUrl: "https://duckduckgo.com/",
     searchUrl: (q) => `https://duckduckgo.com/`,
     inputSelectors: ["input[name='q']", "input#searchbox_input", "input[data-testid='searchbox-input']"],
@@ -30,7 +30,7 @@ const ENGINE_PAGE_CONFIG = {
       "#search_results"
     ]
   },
-  google: {
+  google_ch: {
     homeUrl: "https://www.google.com/",
     searchUrl: (q) => `https://www.google.com/search?q=${encodeURIComponent(q)}&hl=en&udm=14`,
     inputSelectors: ["textarea[name='q']", "input[name='q']"],
@@ -44,13 +44,13 @@ const ENGINE_PAGE_CONFIG = {
       "#rcnt"
     ]
   },
-  bing: {
+  bing_lp: {
     homeUrl: "https://www.bing.com/",
     searchUrl: (q) => `https://www.bing.com/search?q=${encodeURIComponent(q)}`,
     inputSelectors: ["textarea[name='q']", "input[name='q']", "input#sb_form_q"],
     resultSelectors: ["#b_results", "#b_results li.b_algo"]
   },
-  mojeek: {
+  mojeek_lp: {
     homeUrl: "https://www.mojeek.com/",
     searchUrl: (q) => `https://www.mojeek.com/search?q=${encodeURIComponent(q)}`,
     inputSelectors: ["input[name='q']", "input.js-search-input"],
@@ -936,7 +936,7 @@ async function submitSearchFromHomepage({ page, query, engine, config }) {
   const t1 = performance.now();
 
   // DuckDuckGo shows homepage skeleton with ?q=, not results — need to submit the form
-  if (engine === "duckduckgo_chromium") {
+  if (engine === "duckduckgo_ch") {
     await page.waitForSelector(engineConfig.inputSelectors.join(","), {
       timeout: config.browserOpTimeoutMs
     });
@@ -982,7 +982,7 @@ async function runSearchEngine({ manager, query, engine, config }) {
     const t2 = performance.now();
 
     async function extractResults() {
-      if (engine === "duckduckgo_chromium") {
+      if (engine === "duckduckgo_ch") {
         const payload = await page.evaluate(() => {
           const rows = Array.from(document.querySelectorAll("article[data-testid='result'], .result"));
           const results = rows.map((row) => {
@@ -1017,7 +1017,7 @@ async function runSearchEngine({ manager, query, engine, config }) {
         };
       }
 
-      if (engine === "google") {
+      if (engine === "google_chromium") {
         const payload = await page.evaluate(() => {
           const rows = Array.from(document.querySelectorAll("#search .MjjYud, #search .g"));
           const results = rows.map((row) => {
@@ -1052,7 +1052,7 @@ async function runSearchEngine({ manager, query, engine, config }) {
         };
       }
 
-      if (engine === "mojeek") {
+      if (engine === "mojeek_lp") {
         const payload = await page.evaluate(() => {
           const rows = Array.from(document.querySelectorAll(".results-standard li"));
           const results = rows.map((row) => {
