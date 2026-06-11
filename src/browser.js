@@ -25,10 +25,14 @@ const CLONE_EXCLUDE_DIRS = new Set([
 const MONITOR_WIDTH = 1920;
 const MONITOR_HEIGHT = 1080;
 const ENGINE_STARTUP_URLS = {
+  bing_cb: "https://www.bing.com/",
   bing_lp: "https://www.bing.com/",
   duckduckgo_api: "https://duckduckgo.com/",
+  duckduckgo_cb: "https://duckduckgo.com/",
   duckduckgo_ch: "https://duckduckgo.com/",
+  google_cb: "https://www.google.com/",
   google_ch: "https://www.google.com/",
+  google_lp: "https://www.google.com/",
   mojeek_lp: "https://www.mojeek.com/"
 };
 
@@ -91,6 +95,10 @@ export class BrowserManager {
     this.lightpandaProcess = null;
     this.lightpandaBrowser = null;
     this.lightpandaLaunching = null;
+
+    // CloakBrowser
+    this.cloakbrowserBrowser = null;
+    this.cloakbrowserLaunching = null;
 
     // Shared
     this.engineWorkingWindows = new Map();
@@ -631,6 +639,55 @@ export class BrowserManager {
     return page;
   }
 
+  async _launchCloakbrowser() {
+    if (this.cloakbrowserLaunching) return this.cloakbrowserLaunching;
+    this.cloakbrowserLaunching = (async () => {
+      try {
+        const { launch } = await import("cloakbrowser/puppeteer");
+        const browser = await launch({
+          headless: this.config.headless,
+          args: [
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-gpu",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--disable-extensions",
+            "--window-size=1920,1080"
+          ]
+        });
+        this.cloakbrowserBrowser = browser;
+        browser.on("disconnected", () => {
+          this.cloakbrowserBrowser = null;
+          this.cloakbrowserLaunching = null;
+        });
+        logBrowserEvent("cloakbrowser.launch.ready");
+        return browser;
+      } catch (error) {
+        this.cloakbrowserLaunching = null;
+        logBrowserEvent("cloakbrowser.launch.failed", { error: String(error?.message || error) });
+        throw error;
+      }
+    })();
+    return this.cloakbrowserLaunching;
+  }
+
+  getCloakbrowserBrowser() {
+    if (this.cloakbrowserBrowser?.connected) return this.cloakbrowserBrowser;
+    if (this.cloakbrowserLaunching) return this.cloakbrowserLaunching;
+    return this._launchCloakbrowser();
+  }
+
+  async _newCloakbrowserPage() {
+    const browser = await this.getCloakbrowserBrowser();
+    const page = await browser.newPage();
+    await page.setUserAgent(this.config.userAgent);
+    page.setDefaultNavigationTimeout(this.config.browserOpTimeoutMs);
+    page.setDefaultTimeout(this.config.browserOpTimeoutMs);
+    return page;
+  }
+
   async _newChromiumPage() {
     const browser = await this.getBrowser();
     await this.ensureKeepAlivePage(browser);
@@ -645,18 +702,33 @@ export class BrowserManager {
   async newPage(options = {}) {
     const engine = (options && options.engine) || "";
     const backend = (options && options.backend) || this.config.defaultBackend;
+    const lower = engine.toLowerCase();
+    // CloakBrowser routes handle JS-heavy/CAPTCHA-prone engines undetected.
+    const needsCloakbrowser = ["duckduckgo_cb", "google_cb", "bing_cb"].includes(lower);
+    if (needsCloakbrowser) {
+      return this._newCloakbrowserPage();
+    }
     // Chromium-only routes handle JS-heavy/CAPTCHA-prone engines.
-    const needsChromium = ["duckduckgo_ch", "google_ch"].includes(engine.toLowerCase());
+    const needsChromium = ["duckduckgo_ch", "google_ch"].includes(lower);
     if (needsChromium) {
       return this._newChromiumPage();
     }
+    // LightPanda routes for engines that specifically need it.
+    const needsLightpanda = ["bing_lp", "google_lp", "mojeek_lp"].includes(lower);
+    if (needsLightpanda) {
+      return this._newLightpandaPage();
+    }
+    if (backend === "cloakbrowser") return this._newCloakbrowserPage();
     return backend === "chromium" ? this._newChromiumPage() : this._newLightpandaPage();
   }
 
   _poolEngine(engine) {
-    // Chromium routes use per-engine pools; Lightpanda routes share one pool.
-    if (["duckduckgo_ch", "google_ch"].includes((engine || "").toLowerCase())) return engine;
-    return this.config.defaultBackend !== "chromium" ? "_shared" : engine;
+    // CloakBrowser and Chromium routes use per-engine pools; Lightpanda routes share one pool.
+    const lower = (engine || "").toLowerCase();
+    if (["duckduckgo_cb", "google_cb", "bing_cb", "duckduckgo_ch", "google_ch"].includes(lower)) return lower;
+    if (["bing_lp", "google_lp", "mojeek_lp"].includes(lower)) return "_shared";
+    if (this.config.defaultBackend === "cloakbrowser") return lower;
+    return this.config.defaultBackend !== "chromium" ? "_shared" : lower;
   }
 
   _poolMaxWindows(poolEngine) {
@@ -665,8 +737,11 @@ export class BrowserManager {
   }
 
   async ensureMinWorkingWindows(engine, { startupUrl, waitUntil = "domcontentloaded" } = {}) {
-    const needsChromium = ["duckduckgo_ch", "google_ch"].includes((engine || "").toLowerCase());
-    if (this.config.defaultBackend !== "chromium" && !needsChromium) return;
+    const lower = (engine || "").toLowerCase();
+    const needsCloakbrowser = ["duckduckgo_cb", "google_cb", "bing_cb"].includes(lower);
+    const needsChromium = ["duckduckgo_ch", "google_ch"].includes(lower);
+    const needsLightpanda = ["bing_lp", "google_lp", "mojeek_lp"].includes(lower);
+    if (this.config.defaultBackend !== "cloakbrowser" && this.config.defaultBackend !== "chromium" && !needsCloakbrowser && !needsChromium && !needsLightpanda) return;
     const pool = this.getEnginePool(engine);
     this.pruneClosedWindows(pool);
 
@@ -820,6 +895,7 @@ export class BrowserManager {
       backend: this.config.defaultBackend,
       browserConnected: Boolean(this.browser?.connected),
       lightpandaConnected: Boolean(this.lightpandaBrowser?.connected),
+      cloakbrowserConnected: Boolean(this.cloakbrowserBrowser?.connected),
       headless: this.config.headless,
       userDataDir: this.config.chromeUserDataDir,
       profileDir: this.config.chromeProfileDir,
@@ -926,6 +1002,16 @@ export class BrowserManager {
         // ignore process kill errors
       }
       this.lightpandaProcess = null;
+    }
+
+    // CloakBrowser shutdown
+    if (this.cloakbrowserBrowser) {
+      try {
+        await this.cloakbrowserBrowser.close();
+      } catch {
+        // ignore close errors on shutdown
+      }
+      this.cloakbrowserBrowser = null;
     }
 
     this.engineWorkingWindows.clear();

@@ -1,5 +1,7 @@
 import fs from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
@@ -12,7 +14,12 @@ const WAIT_UNTIL_VALUES = new Set([
   "networkidle2"
 ]);
 
-const SEARCH_ENGINE_VALUES = new Set(["bing_lp", "duckduckgo_api", "duckduckgo_ch", "google_ch", "mojeek_lp"]);
+const SEARCH_ENGINE_VALUES = new Set([
+  "bing_cb", "bing_lp",
+  "duckduckgo_api", "duckduckgo_cb", "duckduckgo_ch",
+  "google_cb", "google_ch", "google_lp",
+  "mojeek_lp"
+]);
 
 function parseBoolean(value, fallback) {
   if (value === undefined || value === null || value === "") return fallback;
@@ -95,6 +102,51 @@ export async function resolveChromePath() {
   );
 }
 
+export async function findCloakbrowserPath() {
+  const fromEnv = process.env.CLOAKBROWSER_BINARY_PATH;
+  if (fromEnv && (await canAccess(fromEnv))) {
+    return fromEnv;
+  }
+
+  const homeDir = os.homedir?.() || process.env.HOME || "/root";
+  const knownPaths = [
+    `${homeDir}/.cloakbrowser/chromium-146.0.7680.177.5/chrome`,
+    `${homeDir}/.cloakbrowser/chromium-*/chrome`,
+    "/usr/local/bin/cloakbrowser-chrome"
+  ];
+
+  for (const candidate of knownPaths) {
+    if (candidate.includes("*")) {
+      const parts = candidate.split("*");
+      const prefix = parts[0];
+      try {
+        const entries = await fs.readdir(path.dirname(prefix));
+        const matching = entries
+          .filter((entry) => entry.startsWith(path.basename(prefix)))
+          .sort()
+          .reverse();
+        for (const match of matching) {
+          const fullPath = path.join(path.dirname(prefix), match, "chrome");
+          if (await canAccess(fullPath)) return fullPath;
+        }
+      } catch {
+        continue;
+      }
+    } else if (await canAccess(candidate)) {
+      return candidate;
+    }
+  }
+
+  try {
+    const { launch } = await import("cloakbrowser/puppeteer");
+    const { ensureBinary } = await import("cloakbrowser/dist/download.js");
+    const binaryPath = await ensureBinary();
+    return binaryPath;
+  } catch {
+    return null;
+  }
+}
+
 export async function findLightpandaPath() {
   const fromEnv = process.env.LIGHTPANDA_PATH;
   if (fromEnv && (await canAccess(fromEnv))) {
@@ -142,6 +194,7 @@ export async function loadConfig() {
 
   const chromePath = await resolveChromePath();
   const lightpandaPath = await findLightpandaPath();
+  const cloakbrowserPath = await findCloakbrowserPath();
 
   return {
     chromePath,
@@ -149,7 +202,13 @@ export async function loadConfig() {
     chromeProfileDir: process.env.CHROME_PROFILE_DIR || "Default",
     lightpandaPath,
     lightpandaPort: parseNumber(process.env.LIGHTPANDA_PORT, 9222),
-    defaultBackend: (process.env.BROWSER_BACKEND || "lightpanda").toLowerCase() === "chromium" ? "chromium" : "lightpanda",
+    cloakbrowserPath,
+    defaultBackend: (() => {
+      const raw = (process.env.BROWSER_BACKEND || "cloakbrowser").toLowerCase();
+      if (raw === "chromium") return "chromium";
+      if (raw === "cloakbrowser") return "cloakbrowser";
+      return "lightpanda";
+    })(),
     browserOpTimeoutMs: parseNumber(process.env.BROWSER_OP_TIMEOUT_MS, 60000),
     navWaitUntil,
     headless: parseBoolean(process.env.HEADLESS, headlessDefault),
@@ -173,6 +232,9 @@ export async function loadConfig() {
     enableHangRestart: parseBoolean(process.env.ENABLE_HANG_RESTART, false),
     hangRestartTimeoutMs: parseNumber(process.env.HANG_RESTART_TIMEOUT_MS, 120000),
     startupUrl: process.env.STARTUP_URL || "about:blank",
-    searchEngines: parseEngines(process.env.SEARCH_ENGINES, ["duckduckgo_api", "bing_lp", "mojeek_lp", "google_ch", "duckduckgo_ch"])
+    searchEngines: parseEngines(process.env.SEARCH_ENGINES, ["duckduckgo_api", "bing_lp", "mojeek_lp", "google_ch", "duckduckgo_ch"]),
+    searchFallback: process.env.SEARCH_FALLBACK
+      ? parseEngines(process.env.SEARCH_FALLBACK, [])
+      : null
   };
 }

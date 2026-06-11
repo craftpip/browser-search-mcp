@@ -55,7 +55,7 @@ node -e '
   const payload = JSON.parse(process.argv[1]);
   const content = payload.content || [];
   const text = content[0]?.text || "";
-  if (!text.includes("result id")) {
+  if (!text.includes("ref_id")) {
     throw new Error(`unexpected web_search payload: ${process.argv[1]}`);
   }
   const titleMatch = text.match(/\*\*([^*]+)\*\*/);

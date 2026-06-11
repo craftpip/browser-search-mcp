@@ -3,18 +3,24 @@ import { JSDOM } from "jsdom";
 import { Readability } from "@mozilla/readability";
 import { performance } from "node:perf_hooks";
 
-const SUPPORTED_ENGINES = new Set(["bing_lp", "duckduckgo_api", "duckduckgo_ch", "google_ch", "mojeek_lp"]);
+const SUPPORTED_ENGINES = new Set(["bing_cb", "bing_lp", "duckduckgo_api", "duckduckgo_cb", "duckduckgo_ch", "google_cb", "google_ch", "google_lp", "mojeek_lp"]);
 const ENGINE_BACKENDS = {
-  duckduckgo_api: "http",
+  bing_cb: "cloakbrowser",
   bing_lp: "lightpanda",
-  mojeek_lp: "lightpanda",
+  duckduckgo_api: "http",
+  duckduckgo_cb: "cloakbrowser",
+  duckduckgo_ch: "chromium",
+  google_cb: "cloakbrowser",
   google_ch: "chromium",
-  duckduckgo_ch: "chromium"
+  google_lp: "lightpanda",
+  mojeek_lp: "lightpanda"
 };
-const DEFAULT_FALLBACK_GROUPS = [
-  ["duckduckgo_api"],
-  ["bing_lp", "mojeek_lp"],
-  ["google_ch", "duckduckgo_ch"]
+const DEFAULT_FALLBACK = [
+  "duckduckgo_api",
+  "bing_cb", "bing_lp", "mojeek_lp",
+  "google_cb", "duckduckgo_cb",
+  "google_lp", "duckduckgo_ch",
+  "google_ch"
 ];
 const routeCircuitState = new Map();
 const ENGINE_PAGE_CONFIG = {
@@ -43,6 +49,44 @@ const ENGINE_PAGE_CONFIG = {
       ".g",
       "#rcnt"
     ]
+  },
+  google_cb: {
+    homeUrl: "https://www.google.com/",
+    searchUrl: (q) => `https://www.google.com/search?q=${encodeURIComponent(q)}&hl=en&udm=14`,
+    inputSelectors: ["textarea[name='q']", "input[name='q']"],
+    resultSelectors: [
+      "#search",
+      "#search .MjjYud",
+      "#search .g",
+      "#rso",
+      ".srg",
+      ".g",
+      "#rcnt"
+    ]
+  },
+  duckduckgo_cb: {
+    homeUrl: "https://duckduckgo.com/",
+    searchUrl: (q) => `https://duckduckgo.com/`,
+    inputSelectors: ["input[name='q']", "input#searchbox_input", "input[data-testid='searchbox-input']"],
+    resultSelectors: [
+      "article[data-testid='result']",
+      "#links .result",
+      ".results .result",
+      ".result",
+      "#search_results"
+    ]
+  },
+  bing_cb: {
+    homeUrl: "https://www.bing.com/",
+    searchUrl: (q) => `https://www.bing.com/search?q=${encodeURIComponent(q)}`,
+    inputSelectors: ["textarea[name='q']", "input[name='q']", "input#sb_form_q"],
+    resultSelectors: ["#b_results", "#b_results li.b_algo"]
+  },
+  google_lp: {
+    homeUrl: "https://www.google.com/",
+    searchUrl: (q) => `https://www.google.com/search?q=${encodeURIComponent(q)}&hl=en&udm=14`,
+    inputSelectors: ["textarea[name='q']", "input[name='q']"],
+    resultSelectors: ["#search", "#rso", ".g", "#rcnt"]
   },
   bing_lp: {
     homeUrl: "https://www.bing.com/",
@@ -936,7 +980,7 @@ async function submitSearchFromHomepage({ page, query, engine, config }) {
   const t1 = performance.now();
 
   // DuckDuckGo shows homepage skeleton with ?q=, not results — need to submit the form
-  if (engine === "duckduckgo_ch") {
+  if (engine === "duckduckgo_ch" || engine === "duckduckgo_cb") {
     await page.waitForSelector(engineConfig.inputSelectors.join(","), {
       timeout: config.browserOpTimeoutMs
     });
@@ -982,7 +1026,7 @@ async function runSearchEngine({ manager, query, engine, config }) {
     const t2 = performance.now();
 
     async function extractResults() {
-      if (engine === "duckduckgo_ch") {
+      if (engine === "duckduckgo_ch" || engine === "duckduckgo_cb") {
         const payload = await page.evaluate(() => {
           const rows = Array.from(document.querySelectorAll("article[data-testid='result'], .result"));
           const results = rows.map((row) => {
@@ -1017,7 +1061,7 @@ async function runSearchEngine({ manager, query, engine, config }) {
         };
       }
 
-      if (engine === "google_chromium") {
+      if (engine === "google_chromium" || engine === "google_cb" || engine === "google_ch") {
         const payload = await page.evaluate(() => {
           const rows = Array.from(document.querySelectorAll("#search .MjjYud, #search .g"));
           const results = rows.map((row) => {
@@ -1037,6 +1081,45 @@ async function runSearchEngine({ manager, query, engine, config }) {
             ...document.querySelectorAll("#search .hgKElc, #search .IZ6rdc, #search .V3FYCf")
           ];
           const directAnswers = answerNodes.map((node) => ({
+            source: "direct_answer",
+            text: node?.textContent || ""
+          }));
+
+          return { results, directAnswers };
+        });
+
+        return {
+          results: payload.results.map((item) => ({ ...item, engine })),
+          directAnswers: dedupeDirectAnswers(
+            (payload.directAnswers || []).map((item) => ({ ...item, engine, url: page.url() }))
+          )
+        };
+      }
+
+      if (engine === "google_lp") {
+        const payload = await page.evaluate(() => {
+          const rows = Array.from(
+            document.querySelectorAll("#search .g, #rso .g, .MjjYud")
+          );
+          const results = rows.map((row) => {
+            const anchor = row.querySelector("a[jsname] h3")?.closest("a") ||
+                           row.querySelector("h3 a, a h3") ||
+                           row.querySelector("a");
+            const heading = row.querySelector("h3");
+            const snippetEl = row.querySelector(
+              ".VwiC3b, .st, span.aCOpRe, [data-sncf]"
+            );
+            return {
+              title: heading?.textContent || "",
+              url: anchor?.href || "",
+              snippet: snippetEl?.textContent || ""
+            };
+          });
+
+          const answerNodes = document.querySelectorAll(
+            ".kno-rdesc span, [data-attrid='wa:/description'], .hgKElc"
+          );
+          const directAnswers = Array.from(answerNodes).map((node) => ({
             source: "direct_answer",
             text: node?.textContent || ""
           }));
@@ -1133,7 +1216,7 @@ async function runSearchEngine({ manager, query, engine, config }) {
 
 function routeConcurrencyForEngines(engines, config) {
   const hasLightpandaRoute = engines.some((engine) => ENGINE_BACKENDS[engine] === "lightpanda");
-  if (hasLightpandaRoute && config.defaultBackend !== "chromium") return 1;
+  if (hasLightpandaRoute && config.defaultBackend !== "chromium" && config.defaultBackend !== "cloakbrowser") return 1;
   return Math.max(1, engines.length);
 }
 
@@ -1182,45 +1265,31 @@ async function runFallbackEngineGroups({ manager, query, limit, config }) {
   const errors = [];
   const skipped = [];
 
-  for (const group of DEFAULT_FALLBACK_GROUPS) {
-    const runnable = [];
-    for (const engine of group) {
-      const circuit = getRouteCircuit(engine);
-      if (circuit.open) {
-        skipped.push({ engine, route: circuit.key, remainingMs: circuit.remainingMs, error: circuit.lastError || "route open" });
-      } else {
-        runnable.push(engine);
-      }
+  const engines = (config.searchFallback?.length ? config.searchFallback : DEFAULT_FALLBACK);
+
+  for (const engine of engines) {
+    const circuit = getRouteCircuit(engine);
+    if (circuit.open) {
+      skipped.push({ engine, route: circuit.key, remainingMs: circuit.remainingMs, error: circuit.lastError || "route open" });
+      continue;
     }
 
-    if (!runnable.length) continue;
-
-    const settled = await mapWithConcurrency(
-      runnable,
-      routeConcurrencyForEngines(runnable, config),
-      async (engine) => {
-        try {
-          const value = await runSearchRoute({ manager, query, engine, config, explicit: false });
-          return { status: "fulfilled", value, engine };
-        } catch (reason) {
-          return { status: "rejected", reason, engine };
-        }
-      }
-    );
-
-    const result = buildQueryResult({ query, settled, limit, fallbackAttempted: true });
-    errors.push(...result.errors);
-    if (result.resultCount || result.directAnswerCount) {
+    try {
+      const value = await runSearchRoute({ manager, query, engine, config, explicit: false });
+      const settled = [{ status: "fulfilled", value, engine }];
+      const result = buildQueryResult({ query, settled, limit, fallbackAttempted: true });
       return {
         ...result,
         errors,
         fallback: {
           used: true,
-          selectedGroup: group,
-          selectedEngines: runnable,
-          skipped
+          selectedEngine: engine,
+          skipped,
+          ...(config.searchFallback?.length ? { configuredFallback: config.searchFallback } : {})
         }
       };
+    } catch (reason) {
+      errors.push({ engine, route: routeKey(engine), error: String(reason?.message || reason) });
     }
   }
 
@@ -1233,8 +1302,7 @@ async function runFallbackEngineGroups({ manager, query, limit, config }) {
     errors,
     fallback: {
       used: true,
-      selectedGroup: [],
-      selectedEngines: [],
+      selectedEngine: null,
       skipped
     }
   };
@@ -1364,7 +1432,7 @@ export async function browserOpenAndExtract({ url, maxChars = 8000, includeSeoAn
   const manager = await getBrowserManager();
 
   return manager.withPageSlot(async () => {
-    const page = await manager.newPage({ backend: "chromium" });
+    const page = await manager.newPage({ backend: "cloakbrowser" });
     const operationTimeoutMs = Math.max(1000, Number(manager.config.browserOpTimeoutMs) || 60000);
 
     const withPageTimeout = async (label, task) => {
@@ -1474,7 +1542,7 @@ export async function browserCaptureScreenshot({
       : undefined;
 
   return manager.withPageSlot(async () => {
-    const page = await manager.newPage({ backend: "chromium" });
+    const page = await manager.newPage({ backend: "cloakbrowser" });
 
     try {
       await page.goto(url, {

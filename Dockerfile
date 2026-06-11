@@ -30,6 +30,9 @@ WORKDIR /app
 COPY package.json ./
 RUN npm install --omit=dev
 
+# Install CloakBrowser stealth Chromium binary
+RUN npx cloakbrowser install
+
 COPY src ./src
 COPY docker/entrypoint.sh /entrypoint.sh
 

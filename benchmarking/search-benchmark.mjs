@@ -54,7 +54,7 @@ async function main() {
 
   await client.connect(transport);
 
-  const engines = ENGINE ? [ENGINE] : ["duckduckgo_api", "bing_lp", "mojeek_lp", "google_ch", "duckduckgo_ch"];
+  const engines = ENGINE ? [ENGINE] : ["duckduckgo_api", "bing_cb", "bing_lp", "mojeek_lp", "google_cb", "google_ch", "duckduckgo_cb", "google_lp", "duckduckgo_ch"];
 
   function makeQuery(run) {
     return UNIQUE_QUERIES ? `${QUERY} ${run} ${Date.now()}` : QUERY;
