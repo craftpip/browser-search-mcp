@@ -611,11 +611,30 @@ async function captureSeoSnapshot(
           return segments.join(" > ");
         };
 
-        const shouldSkipNode = (pathLower, roleAttr = "") => {
-          if (!pathLower) return false;
-          if (roleAttr && /(navigation|banner|contentinfo|complementary)/.test(roleAttr)) return true;
-          return /(footer|nav|subscribe|cookie|legal|banner|header|menu|signin|login)/.test(pathLower);
-        };
+          const shouldSkipNode = (pathLower, roleAttr = "") => {
+            if (!pathLower) return false;
+            if (roleAttr && /(navigation|banner|contentinfo|complementary)/.test(roleAttr)) return true;
+            if (/(footer|nav|subscribe|cookie|legal|banner|header|signin|login)/.test(pathLower)) return true;
+            return false;
+          };
+
+          const isLikelyNavText = (text) => {
+            const lower = text.toLowerCase();
+            const navSignals = ["sign in", "subscribe", "log in", "register", "menu", "cookie", "privacy policy", "terms of service", "follow us", "newsletter", "ad choices"];
+            let hits = 0;
+            for (const signal of navSignals) {
+              if (lower.includes(signal)) hits++;
+            }
+            return hits;
+          };
+
+          const getTagBoost = (el) => {
+            const tag = (el.tagName || "").toLowerCase();
+            if (tag === "article") return 1500;
+            if (tag === "main") return 800;
+            if (tag === "section") return 400;
+            return 0;
+          };
 
         const computeDepth = (node) => {
           let depth = 0;
@@ -669,13 +688,17 @@ async function captureSeoSnapshot(
           const bottomEdge = rectTop + (rect?.height || 0);
           const normalizedBottom = documentHeight ? bottomEdge / documentHeight : normalizedTop;
           const bottomPenalty = normalizedBottom > 0.9 ? (normalizedBottom - 0.9) * 1500 : 0;
+          const tagBoost = getTagBoost(el);
+          const navPenalty = isLikelyNavText(text) * 300;
 
           const score =
             text.length +
             headingWeight * 250 -
             linkDensity * 400 +
             Math.max(0, 300 - depth * 20) +
-            sizeScore -
+            sizeScore +
+            tagBoost -
+            navPenalty -
             viewportPenalty -
             bottomPenalty;
 
@@ -1475,7 +1498,7 @@ export async function browserOpenAndExtract({ url, maxChars = 8000, includeSeoAn
                 document.querySelector("main, article, [role='main'], .content, #content") || document.body;
               if (!container) return false;
               const text = container.innerText || "";
-              return text.replace(/\s+/g, " ").trim().length > 200;
+              return text.replace(/\s+/g, " ").trim().length > 2000;
             },
             { timeout: Math.min(10000, manager.config.browserOpTimeoutMs) }
           )
@@ -1496,6 +1519,27 @@ export async function browserOpenAndExtract({ url, maxChars = 8000, includeSeoAn
       const [html, resolvedUrl, pageTitle] = await withPageTimeout("serialize_html", () =>
         Promise.all([page.content(), Promise.resolve(page.url()), page.title()])
       );
+
+      const botChallenge = await withPageTimeout("check_bot", () =>
+        page.evaluate(() => {
+          const title = document.title || "";
+          const bodyText = (document.body?.innerText || "").trim();
+          const html = (document.documentElement?.outerHTML || "").toLowerCase();
+          if (html.includes("cf-browser-verification") || html.includes("__cf_challenge")) return "Cloudflare challenge";
+          if (html.includes("data-dome") || bodyText.includes("Please enable JS") || bodyText.includes("disable any ad blocker")) return "DataDome challenge";
+          if (!title || /^[a-z0-9-]+\.[a-z]{2,}$/i.test(title)) return `Bot block detected (title: "${title}")`;
+          return null;
+        }).catch(() => null)
+      );
+
+      if (botChallenge) {
+        return {
+          title: pageTitle || resolvedUrl || "",
+          url: resolvedUrl,
+          text: "",
+          error: botChallenge
+        };
+      }
 
       const extracted = extractTextFromHtml({
         html,

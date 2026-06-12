@@ -44,7 +44,6 @@ services:
       BROWSER_BACKEND: ${BROWSER_BACKEND:-cloakbrowser}
     volumes:
       - .:/app
-      - /app/node_modules
       - /tmp/screenshots:/app/screenshots
       - chrome_profile_data:/data/chrome
     ports:

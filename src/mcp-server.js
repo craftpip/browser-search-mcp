@@ -973,7 +973,7 @@ async function handleToolCall(name, args = {}) {
     }
     mark = timer.step("resolve_targets", mark);
     const maxChars = parseMaxChars(args.maxChars, 8000);
-    const includeSeoAnalysis = args.includeSeoAnalysis === true;
+    const includeSeoAnalysis = args.includeSeoAnalysis !== false;
     const manager = await getBrowserManager();
     mark = timer.step("prepare_execution", mark);
     const result = await runWithHangGuard(`mcp:${name}`, () =>
