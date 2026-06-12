@@ -7,6 +7,8 @@
   "scripts": {
     "start": "node src/mcp-server.js",
     "bench": "node scripts/benchmark.mjs",
+    "bench:search": "node benchmarking/search-benchmark.mjs",
+    "bench:all": "node scripts/benchmark.mjs && node benchmarking/search-benchmark.mjs",
     "test:mcporter": "bash scripts/test-mcporter.sh",
     "docs": "typedoc src/ --out doc"
   },
