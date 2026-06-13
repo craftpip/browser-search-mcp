@@ -1100,17 +1100,17 @@ function createMcpServer() {
     const sumTargets = summary.urlCount || summary.refCount
       ? `${summary.urlCount || 0} urls, ${summary.refCount || 0} refs` : "";
 
+    console.error(`📡  ${name}${sumTerms ? " · " + truncateStr(sumTerms, 60) : ""}${sumTargets ? " · " + sumTargets : ""}`);
+
     try {
       const t0 = Date.now();
       const response = await handleToolCall(name, args);
       const ms = Date.now() - t0;
       const ok = response?.content?.[0]?.text || "";
       const okLabel = ok.length ? `${Math.round(ok.length / 1000)}k chars` : "";
-      console.error(`📡  ${name}${sumTerms ? " · " + truncateStr(sumTerms, 60) : ""}${sumTargets ? " · " + sumTargets : ""}`);
       console.error(`📨  ${ms}ms${okLabel ? " · " + okLabel : ""}`);
       return response;
     } catch (error) {
-      console.error(`📡  ${name}${sumTerms ? " · " + truncateStr(sumTerms, 60) : ""}${sumTargets ? " · " + sumTargets : ""}`);
       console.error(`❌  ${truncateStr(String(error?.message || error), 120)}`);
       const errorResponse = {
         isError: true,
@@ -1172,6 +1172,11 @@ async function maybeStartHttpServer(managerOverride) {
           }
 
           const t0 = Date.now();
+          const isToolCall = body?.method === "tools/call";
+          if (reqSum && isToolCall) {
+            console.error(`📡  ${reqSum}`);
+          }
+
           const response = await handleStatelessMcpPost(body);
           const ms = Date.now() - t0;
 
@@ -1185,8 +1190,11 @@ async function maybeStartHttpServer(managerOverride) {
           if (body?.method === "initialize") {
             console.error(`🤝  MCP initialized`);
           } else if (reqSum) {
-            console.error(`📡  ${reqSum}`);
-            console.error(`📨  ${ms}ms · ${resSum || "ok"}`);
+            if (isToolCall) {
+              console.error(`📨  ${ms}ms${resSum ? " · " + resSum : ""}`);
+            } else {
+              console.error(`📡  ${reqSum} · ${ms}ms${resSum ? " · " + resSum : ""}`);
+            }
           }
           sendJson(res, 200, response);
           return;
@@ -1564,9 +1572,9 @@ process.on("unhandledRejection", async (reason) => {
 
 manager.prelaunchIfConfigured().then(
   () => {
-    logEvent("prelaunch.ready", {
-      enabled: manager.config.prelaunchBrowser
-    });
+    if (manager.config.prelaunchBrowser) {
+      logEvent("prelaunch.ready", { enabled: true });
+    }
   },
   (error) => {
     logEvent("prelaunch.error", {

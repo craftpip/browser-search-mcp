@@ -1366,6 +1366,17 @@ function buildQueryResult({ query, settled, limit, fallbackAttempted }) {
     }
   }
 
+  const engineCounts = {};
+  for (const r of allResults) {
+    engineCounts[r.engine] = (engineCounts[r.engine] || 0) + 1;
+  }
+  const engineParts = Object.entries(engineCounts)
+    .sort((a, b) => b[1] - a[1])
+    .map(([e, c]) => `${e}=${c}`);
+  if (engineParts.length) {
+    console.error(`📊  ${query}: ${engineParts.join(", ")}`);
+  }
+
   const results = dedupeAndMergeResults(allResults, limit);
   const directAnswers = dedupeDirectAnswers(allDirectAnswers);
   return {
