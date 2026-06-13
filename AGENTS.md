@@ -68,7 +68,37 @@ npm run test:mcporter  # Test MCP integration
 - Prefer `ref_id`/`ref_ids` immediately after a search in the same session
 - Sticky search windows are reused for performance
 
+## Development Commands
+
+```bash
+npm start          # Run MCP server over stdio
+npm run test:mcporter  # Test MCP integration
+docker compose build   # Build Docker image
+docker compose down && docker compose up -d  # Restart containers
+```
+
 ## Project Learnings
+
+### Branch switch + Docker deploy workflow
+
+**Created:** 2026-06-13
+**Last updated:** 2026-06-13
+
+**Trigger:** User asked to check out a branch, build, and restart container.
+
+**Mistake / Problem:** Tried `npm install` directly on the host instead of using `docker compose build`. The project uses Docker for building and running.
+
+**Correct Approach:**
+1. `git checkout <branch-name>` to switch branches
+2. `docker compose build` to rebuild the Docker image with the new code
+3. `docker compose down && docker compose up -d` to restart the container
+4. Check health: `docker exec <container> curl -s localhost:3000/health`
+
+**Verification:** Health endpoint returns `{"ok":true}` with the expected backend and no open circuit breakers.
+
+**Scope:** This project runs fully in Docker. Always use Docker commands for building and deploying.
+
+**Related terms:** branch, checkout, build, deploy, docker compose, restart
 
 ### 2026-06-11 - Diagnosing container health
 
