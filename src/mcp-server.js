@@ -162,17 +162,28 @@ function truncateStr(s, max = 80) {
   return s.slice(0, max) + "...";
 }
 
+function getDomain(u) {
+  try { return new URL(u).hostname; } catch { return ""; }
+}
+
 function mcpRequestSummary(body) {
   if (!body) return "?";
   const m = body?.method || "";
   if (m !== "tools/call") return m;
   const name = body?.params?.name || "?";
   const args = body?.params?.arguments || {};
+  const isPage = name === "web_open_page" || name === "web_page_screenshot";
   const parts = [name];
   if (args.query) parts.push(`"${truncateStr(args.query, 60)}"`);
   if (args.queries) parts.push(truncateStr(args.queries.join(" | "), 60));
-  if (args.url) parts.push(truncateStr(args.url, 60));
-  if (args.urls) parts.push(`${args.urls.length} urls`);
+  if (args.url) {
+    const domain = getDomain(args.url);
+    parts.push(isPage && domain ? domain : truncateStr(args.url, 60));
+  }
+  if (args.urls) {
+    const domain = getDomain(args.urls[0]);
+    parts.push(`${args.urls.length} urls${domain ? ` · ${domain}` : ""}`);
+  }
   if (args.ref_id !== void 0) parts.push(`ref #${args.ref_id}`);
   if (args.ref_ids) parts.push(`${args.ref_ids.length} refs`);
   const eng = args.engine || (Array.isArray(args.engines) ? args.engines.join(",") : "");
@@ -195,6 +206,20 @@ function firstResultTitle(text) {
   return "";
 }
 
+function extractDomains(text) {
+  const domains = [];
+  const lines = text.split("\n");
+  for (const line of lines) {
+    const m = line.match(/URL:\s*(https?:\/\/([^\/\s]+))/);
+    if (m && !domains.includes(m[2])) domains.push(m[2]);
+  }
+  if (!domains.length) {
+    const m = text.match(/\[ref_id \d+\].*?\]\s+(https?:\/\/([^\/\s]+))/);
+    if (m && !domains.includes(m[2])) domains.push(m[2]);
+  }
+  return domains.join(", ");
+}
+
 function mcpResponseSummary(resp) {
   if (!resp) return "";
   if (resp.error) return `error: ${truncateStr(resp.error.message || "", 80)}`;
@@ -206,11 +231,17 @@ function mcpResponseSummary(resp) {
   const refs = text.match(/\[ref_id \d+\]/g);
   if (refs) {
     const hint = firstResultTitle(text);
-    return `${refs.length} results${hint ? ` · “${hint}”` : ""}`;
+    const domains = extractDomains(text);
+    const domainsPart = domains ? ` · ${domains}` : "";
+    return `${refs.length} results${hint ? ` · “${hint}”` : ""}${domainsPart}`;
   }
   const okCount = (text.match(/Status: Success/g) || []).length;
   const failCount = (text.match(/Status: Failed/g) || []).length;
-  if (okCount || failCount) return `${okCount + failCount} pages (${okCount} ok, ${failCount} err)`;
+  if (okCount || failCount) {
+    const domains = extractDomains(text);
+    const domainsPart = domains ? ` · ${domains}` : "";
+    return `${okCount + failCount} pages (${okCount} ok, ${failCount} err)${domainsPart}`;
+  }
   return `${Math.round(text.length / 1000)}k chars`;
 }
 
