@@ -3,6 +3,29 @@ import { JSDOM } from "jsdom";
 import { Readability } from "@mozilla/readability";
 import { performance } from "node:perf_hooks";
 
+async function waitForContent(page, { pollInterval = 300, stableMs = 500, minChars = 500, maxWait = 4000 } = {}) {
+  const start = Date.now();
+  let lastLength = -1;
+  let lastStable = start;
+
+  while (Date.now() - start < maxWait) {
+    const len = await page.evaluate(() => {
+      const c = document.querySelector("main, article, [role='main'], .content, #content") || document.body;
+      return c ? c.innerText.replace(/\s+/g, " ").trim().length : 0;
+    });
+
+    if (len >= minChars) return;
+    if (len === lastLength) {
+      if (Date.now() - lastStable >= stableMs) return;
+    } else {
+      lastLength = len;
+      lastStable = Date.now();
+    }
+
+    await new Promise((r) => setTimeout(r, pollInterval));
+  }
+}
+
 const SUPPORTED_ENGINES = new Set(["bing_cb", "bing_lp", "duckduckgo_api", "duckduckgo_cb", "duckduckgo_ch", "google_cb", "google_ch", "google_lp", "mojeek_lp"]);
 const ENGINE_BACKENDS = {
   bing_cb: "cloakbrowser",
@@ -1484,20 +1507,7 @@ export async function browserOpenAndExtract({ url, maxChars = 8000, includeSeoAn
         })
       );
 
-      await withPageTimeout("wait_for_content", () =>
-        page
-          .waitForFunction(
-            () => {
-              const container =
-                document.querySelector("main, article, [role='main'], .content, #content") || document.body;
-              if (!container) return false;
-              const text = container.innerText || "";
-              return text.replace(/\s+/g, " ").trim().length > 2000;
-            },
-            { timeout: Math.min(10000, manager.config.browserOpTimeoutMs) }
-          )
-          .catch(() => null)
-      );
+      await waitForContent(page, { maxWait: 5000 }).catch(() => {});
 
       const seoSnapshot =
         includeSeoAnalysis === false
@@ -1588,18 +1598,7 @@ export async function browserCaptureScreenshot({
         timeout: manager.config.browserOpTimeoutMs
       });
 
-      await page
-        .waitForFunction(
-          () => {
-            const container =
-              document.querySelector("main, article, [role='main'], .content, #content") || document.body;
-            if (!container) return false;
-            const text = container.innerText || "";
-            return text.replace(/\s+/g, " ").trim().length > 200;
-          },
-          { timeout: Math.min(10000, manager.config.browserOpTimeoutMs) }
-        )
-        .catch(() => null);
+      await waitForContent(page, { maxWait: 5000 }).catch(() => {});
 
       const dimensions = await page.evaluate(() => {
         const docEl = document.documentElement;
