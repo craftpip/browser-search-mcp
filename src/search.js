@@ -988,7 +988,7 @@ async function runDuckDuckGoHttpSearch({ query, engine, config }) {
   }
 
   const t1 = performance.now();
-  console.error(`[timing] ${engine}.http_total ${Math.round(t1 - t0)}ms`);
+  console.error(`⏱️  ${engine}: http_total=${Math.round(t1 - t0)}ms`);
   return { results, directAnswers };
 }
 
@@ -1020,9 +1020,7 @@ async function submitSearchFromHomepage({ page, query, engine, config }) {
     const tMid = performance.now();
     await waitForAnySelector(page, engineConfig.resultSelectors, config.browserOpTimeoutMs);
     const t2 = performance.now();
-    console.error(`[timing] ${engine}.goto ${Math.round(t1 - t0)}ms`);
-    console.error(`[timing] ${engine}.submit_form ${Math.round(tMid - t1)}ms`);
-    console.error(`[timing] ${engine}.wait_results ${Math.round(t2 - tMid)}ms`);
+    console.error(`⏱️  ${engine}: goto=${Math.round(t1 - t0)}ms → submit_form=${Math.round(tMid - t1)}ms → wait_results=${Math.round(t2 - tMid)}ms`);
     return;
   }
 
@@ -1031,8 +1029,7 @@ async function submitSearchFromHomepage({ page, query, engine, config }) {
   await waitForAnySelector(page, engineConfig.resultSelectors, config.browserOpTimeoutMs);
   const t2 = performance.now();
 
-  console.error(`[timing] ${engine}.goto ${Math.round(t1 - t0)}ms`);
-  console.error(`[timing] ${engine}.wait_results ${Math.round(t2 - t1)}ms`);
+  console.error(`⏱️  ${engine}: goto=${Math.round(t1 - t0)}ms → wait_results=${Math.round(t2 - t1)}ms`);
 }
 
 async function runSearchEngine({ manager, query, engine, config }) {
@@ -1226,10 +1223,7 @@ async function runSearchEngine({ manager, query, engine, config }) {
     const result = await extractResults();
     const t3 = performance.now();
 
-    console.error(`[timing] ${engine}.acquire_window ${Math.round(t1 - t0)}ms`);
-    console.error(`[timing] ${engine}.search_submit ${Math.round(t2 - t1)}ms`);
-    console.error(`[timing] ${engine}.extract_results ${Math.round(t3 - t2)}ms`);
-    console.error(`[timing] ${engine}.total ${Math.round(t3 - t0)}ms`);
+    console.error(`⏱️  ${engine}: acquire_window=${Math.round(t1 - t0)}ms → search_submit=${Math.round(t2 - t1)}ms → extract_results=${Math.round(t3 - t2)}ms | total=${Math.round(t3 - t0)}ms`);
 
     return result;
   } finally {

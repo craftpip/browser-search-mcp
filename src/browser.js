@@ -36,22 +36,57 @@ const ENGINE_STARTUP_URLS = {
   mojeek_lp: "https://www.mojeek.com/"
 };
 
+const BROWSER_LOG_EMOJI = {
+  "lightpanda.spawn_failed": "❌",
+  "lightpanda.exit": "🚪",
+  "cloakbrowser.launch.ready": "✅",
+  "cloakbrowser.launch.failed": "❌",
+  "search.window.opened": "🪟",
+  "search.window.closed": "🔒",
+  "search.warmup.ready": "✅",
+  "chromium.prelaunch.ready": "✅"
+};
+
+const BROWSER_LOG_LABEL = {
+  "lightpanda.spawn_failed": "Lightpanda Spawn Failed",
+  "lightpanda.exit": "Lightpanda Exited",
+  "cloakbrowser.launch.ready": "CloakBrowser Ready",
+  "cloakbrowser.launch.failed": "CloakBrowser Failed",
+  "search.window.opened": "Window Opened",
+  "search.window.closed": "Window Closed",
+  "search.warmup.ready": "Search Windows Warmed",
+  "chromium.prelaunch.ready": "Chromium Ready"
+};
+
+const BROWSER_LOG_FMT = {
+  "search.window.opened":  (p) => `${p?.engine || "?"}  (${p?.reason || "?"})`,
+  "search.window.closed":  (p) => `${p?.engine || "?"}  (${p?.reason || "?"})`,
+  "search.warmup.ready":  (p) => `${p?.engines?.length || 0} engines`,
+  "chromium.prelaunch.ready": () => ""
+};
+
 function logBrowserEvent(label, payload) {
-  const timestamp = new Date().toISOString();
+  const emoji = BROWSER_LOG_EMOJI[label] || "●";
+  const readable = BROWSER_LOG_LABEL[label] || label;
+  const fmt = BROWSER_LOG_FMT[label];
+
+  if (fmt) {
+    const extra = fmt(payload || {});
+    console.error(`${emoji}  ${readable}${extra ? "  " + extra : ""}`);
+    return;
+  }
+
   if (!payload || typeof payload !== "object") {
-    const suffix = payload === undefined ? "" : ` ${String(payload)}`;
-    console.error(`[${timestamp}] ${label}${suffix}`);
+    const suffix = payload === undefined ? "" : `  ${String(payload)}`;
+    console.error(`${emoji}  ${readable}${suffix}`);
     return;
   }
 
-  const entries = Object.entries(payload).filter(([, value]) => value !== undefined);
-  if (!entries.length) {
-    console.error(`[${timestamp}] ${label}`);
-    return;
-  }
-
-  const rendered = entries.map(([key, value]) => `${key}=${typeof value === "string" ? value : JSON.stringify(value)}`);
-  console.error(`[${timestamp}] ${label} ${rendered.join(" ")}`);
+  const extra = Object.entries(payload)
+    .filter(([, v]) => v !== undefined)
+    .map(([k, v]) => `${k}=${typeof v === "string" ? v : JSON.stringify(v)}`)
+    .join(" ");
+  console.error(`${emoji}  ${readable}${extra ? "  " + extra : ""}`);
 }
 
 function isLockError(error) {

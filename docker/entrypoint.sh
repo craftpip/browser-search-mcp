@@ -33,7 +33,7 @@ fi
 
 # Ensure node_modules matches package.json (handles branch switches, stale volumes)
 if [ -f "package.json" ]; then
-  npm install --omit=dev --no-audit --no-fund 2>/dev/null
+  npm install --silent --omit=dev --no-audit --no-fund 2>/dev/null
 fi
 
 exec "$@"
