@@ -2,8 +2,35 @@
   "name": "browser-search-mcp",
   "version": "1.0.0",
   "description": "MCP server for real Chromium browser search and extraction",
+  "license": "Apache-2.0",
   "type": "module",
   "main": "src/mcp-server.js",
+  "files": [
+    "src",
+    "docker",
+    "scripts",
+    "Dockerfile",
+    "docker-compose.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/craftpip/browser-search-mcp.git"
+  },
+  "homepage": "https://github.com/craftpip/browser-search-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/craftpip/browser-search-mcp/issues"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "browser",
+    "search",
+    "chromium",
+    "puppeteer",
+    "http-server"
+  ],
   "scripts": {
     "start": "node src/mcp-server.js",
     "bench": "node scripts/benchmark.mjs",

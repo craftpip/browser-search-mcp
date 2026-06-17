@@ -1,320 +1,414 @@
 # Browser Search MCP Server
 
-MCP server that drives a real Chromium browser with Puppeteer for:
+Browser Search MCP gives your MCP client a real browser for:
 
-- web search (`web_search`)
-- page extraction (`web_open_page`)
-- page screenshots (`web_page_screenshot`)
+- web search
+- readable page extraction
+- page screenshots
 
-It supports persistent Chromium profiles, robust profile lock recovery, and Docker with optional VNC/noVNC for interactive browser inspection.
+It is built for HTTP MCP first, which makes it easy to run once and connect many times. If your client needs to launch a local process, stdio is supported too.
 
-The server can run MCP over stdio, Streamable HTTP (`/mcp`), or both at the same time.
+## What Makes It Nice To Use
 
-## Features
+- Real browser-backed search instead of a thin scraper
+- Multiple search engines and multiple browser/backend routes
+- Route-level circuit breakers so one failing route does not poison every request
+- A strong `web_open_page` tool that returns clean, readable content
+- A screenshot tool that can return base64, a local file path, or a download link
+- Persistent browser sessions and profiles
+- Optional VNC/noVNC access for interactive debugging
 
-- Shared browser manager (single Chromium instance reused across tool calls)
-- Prelaunch mode for headful browser startup (ready right after container boot)
-- Auto-recreate when browser disconnects
-- Graceful shutdown on `SIGINT` / `SIGTERM`
-- Persistent profile support via `CHROME_USER_DATA_DIR` + `CHROME_PROFILE_DIR`
-- Profile lock recovery flow:
-  1. normal launch
-  2. remove stale lock files and retry
-  3. clone profile to temp dir and launch there
-- Parallel multi-engine search for a single query
-- Article-aware extraction using Mozilla Readability with DOM cleanup fallback
-- Tree-aware SEO snapshot that captures headings, canonical URLs, and main content HTML/text
-- Configurable timeout, navigation wait strategy, and search engine list
+## Highlights
 
-## Project structure
+### Multi-engine search with route circuit breakers
 
-- `src/config.js` - environment and runtime config
-- `src/browser.js` - shared browser lifecycle and lock recovery
-- `src/search.js` - search and extraction logic
-- `src/mcp-server.js` - MCP stdio server and tool handlers
-- `docker/entrypoint.sh` - VNC/noVNC bootstrap
-- `Dockerfile` - container image for Chromium + MCP server
-- `docker-compose.yml` - local orchestration with persistent profile volume
+This project is built to keep working even when one search route gets flaky.
 
-## Local install and run
+- It supports multiple engines, including browser-backed and HTTP-backed routes
+- It tracks route health separately
+- When a route fails, it is temporarily opened in a circuit-breaker state instead of being hammered over and over
+- Healthy routes can keep serving requests while unhealthy routes cool down
+- Route health is visible from the `/health` endpoint
+
+That makes the server much nicer for real use, especially in long-running HTTP deployments.
+
+### Multiple search options inside the engine pool
+
+This project does not depend on just one search path.
+
+Depending on configuration, it can use a mix of:
+
+- `duckduckgo_api`
+- `bing_lp`
+- `mojeek_lp`
+- `google_ch`
+- `duckduckgo_ch`
+- and additional supported routes such as `bing_cb`, `duckduckgo_cb`, `google_cb`, and `google_lp`
+
+That gives you flexibility when tuning for speed, resilience, compatibility, or anti-bot behavior.
+
+### `web_open_page` is built for readable extraction
+
+The open-page tool is one of the strongest parts of the project.
+
+It does more than dump raw HTML. The extraction flow combines several methods:
+
+- page navigation plus content settling, so extraction waits for meaningful content to appear
+- DOM cleanup to remove noise like scripts, styles, popups, cookie banners, and obvious non-content areas
+- Mozilla Readability for article-style extraction when possible
+- a fallback semantic candidate scoring system that scores likely main-content blocks using things like text length, link density, heading density, depth, size, and position on the page
+- SEO-aware snapshotting that captures headings, canonical URL, meta description, and the best main-content candidates
+
+The final text prefers the richer main-content extraction when it beats the simpler article extraction.
+
+So the output is usually much closer to what a person would want to read, not just what the DOM happened to contain.
+
+### `web_page_screenshot` is designed for real LLM workflows
+
+The screenshot tool started with base64 output, which is still supported, but large base64 blobs can waste tokens.
+
+So the tool now supports better output modes too:
+
+- base64 mode: useful when inline image data is acceptable
+- path mode: the server stores the screenshot and returns a file path instead of base64
+- link mode: the server stores the screenshot and returns a download URL instead of base64
+
+Path mode is handy when the caller is on the same machine and can read the file directly.
+
+Link mode is handy when the caller is remote and needs an HTTP URL to fetch the image.
+
+You can enable these behaviors with:
+
+- `ENABLE_SCREENSHOT_PATH`
+- `ENABLE_SCREENSHOT_DOWNLOAD_LINK`
+
+When either storage mode is enabled, the tool writes the screenshot to disk and avoids sending the full base64 payload back in the normal response.
+
+### Lots of controls when you need them
+
+The server is easy to start, but it also exposes a lot of tuning knobs for real-world use:
+
+- browser backend selection
+- engine selection and fallback behavior
+- timeouts and navigation strategy
+- browser profile persistence
+- HTTP vs stdio transport
+- screenshot storage behavior
+- VNC/noVNC debugging
+- concurrency and page operation limits
+
+## Start Here
+
+If you just want this working quickly, use the HTTP server setup below.
+
+You will:
+
+1. start the server with Docker
+2. verify the health endpoint
+3. point your MCP client at `http://127.0.0.1:3000/mcp`
+
+## Recommended Setup: HTTP MCP Server
+
+This is the best setup for most users.
+
+### Requirements
+
+- Docker
+- Docker Compose
+
+### Quick Start
+
+1. Clone the repo:
+
+```bash
+git clone https://github.com/craftpip/browser-search-mcp.git
+cd browser-search-mcp
+```
+
+2. Copy the example config:
+
+```bash
+cp .env.example .env
+```
+
+3. Start the server:
+
+```bash
+docker compose up --build -d
+```
+
+### Check That It Works
+
+Run:
+
+```bash
+curl -s http://127.0.0.1:3000/health
+```
+
+You should see a JSON response with `"ok": true`.
+
+### Connect Your MCP Client
+
+Use this MCP endpoint:
+
+```text
+http://127.0.0.1:3000/mcp
+```
+
+If your client is on a different machine, replace `127.0.0.1` with the server IP or hostname.
+
+### Example HTTP MCP Config
+
+Different clients use different config formats, but the important value is the MCP URL:
+
+```json
+{
+  "mcpServers": {
+    "browser-search": {
+      "transport": "http",
+      "url": "http://127.0.0.1:3000/mcp"
+    }
+  }
+}
+```
+
+## Alternative Setup: stdio
+
+Use stdio when your MCP client wants to launch a local command directly.
+
+### Local stdio with Node.js
 
 Requirements:
 
 - Node.js 20+
-- Chromium installed locally (or set `CHROME_PATH`)
+- Chromium installed locally, or `CHROME_PATH` set to a valid browser binary
 
-Install:
+Install dependencies:
 
 ```bash
 npm install
 ```
 
-Run server over stdio:
+Run the server:
 
 ```bash
 npm start
 ```
 
-## MCP client integration
-
-Example MCP client config (stdio) using this project directory:
+Example client config:
 
 ```json
 {
   "mcpServers": {
     "browser-search": {
       "command": "node",
-      "args": ["/absolute/path/to/browser-search-mcp/src/mcp-server.js"],
-      "env": {
-        "HEADLESS": "false",
-        "CHROME_USER_DATA_DIR": "/tmp/chrome-mcp-profile",
-        "CHROME_PROFILE_DIR": "Default",
-        "PRELAUNCH_BROWSER": "1",
-        "SEARCH_ENGINES": "duckduckgo_api,bing_lp,mojeek_lp,google_ch,duckduckgo_ch",
-        "BROWSER_OP_TIMEOUT_MS": "60000",
-        "NAV_WAIT_UNTIL": "domcontentloaded"
-      }
+      "args": ["/absolute/path/to/browser-search-mcp/src/mcp-server.js"]
     }
   }
 }
 ```
 
-For Streamable HTTP transport, enable `ENABLE_HTTP_MCP=1` and connect the client to:
+### stdio Backed by Docker
 
-- `http://<host>:<MCP_API_PORT>/mcp`
+If your MCP client spawns lots of short-lived stdio sessions, use the landing script so the Docker container and browser profile can be reused.
 
-You can run both transports together by keeping `ENABLE_STDIO_MCP=1` and setting `ENABLE_HTTP_MCP=1`.
+- Linux/macOS: `scripts/mcp-stdio-docker.sh`
+- Windows: `scripts\mcp-stdio-docker.bat`
 
-Tools exposed:
-
-- `web_search` input: `{ query?, queries?, limit?, engines?, engine? }`
-- `web_open_page` input: `{ url? | urls? | ref_id? | ref_ids?, maxChars? }`
-- `web_page_screenshot` input: `{ url? | urls? | ref_id? | ref_ids?, format?, quality?, fullPage? }`
-
-`web_search` labels each result link with a numeric reference like `[1]` and truncates displayed links to 50 characters.
-`web_open_page` can open by direct `url`/`urls` or by `ref_id`/`ref_ids` from previous `web_search` results.
-
-## Agent Inference Guide
-
-Use this section as the tool contract for LLM/agent planning and calling.
-
-`web_search`
-- Purpose: primary tool for broad web research across nearly any user request.
-- Use cases: fact lookup, documentation discovery, tutorials, comparisons, current events, and general information gathering.
-- Input:
-  - `query` string (single query) OR `queries` string[] (multiple variants)
-  - optional `limit` number (default `5`)
-  - optional `engine` (`duckduckgo_api` | `bing_lp` | `mojeek_lp` | `google_ch` | `duckduckgo_ch`)
-  - optional `engines` array of engines
-- Output highlights:
-  - `results[]` contains `title`, `snippet`, `llmText`
-  - `results[].ref_id` is a numeric handle for follow-up page opens
-  - `results[].link` and `results[].url` are display-safe (`[n]` + truncated link)
-
-`web_open_page`
-- Purpose: open one or more pages and return cleaned readable text for downstream reasoning.
-- Use cases: summarization, extraction, question answering, and synthesis from full page content.
-- Input (choose one mode):
-  - single URL: `{ "url": "https://..." }`
-  - multiple URLs: `{ "urls": ["https://...", "https://..."] }`
-  - single ref from `web_search`: `{ "ref_id": 1 }`
-  - multiple refs: `{ "ref_ids": [1, 2, 3] }`
-  - optional `maxChars` number (default `8000`)
-- Behavior:
-  - when `urls`/`ref_ids` are provided, opens in parallel up to `OPEN_PAGE_MAX_PARALLEL`
-  - returns per-item success/error for multi-open calls
-  - response now includes `seo`, a tree-aware snapshot with:
-    - `title`, `canonicalUrl`, `metaDescription`
-    - `headings[]` with level + DOM path information
-    - `mainContentText` (preserves paragraphs) and `mainContentHtml`
-    - `candidates[]` showing the top-scoring semantic nodes considered for the main body
-  - the `text` field automatically prefers `seo.mainContentText` when it contains more on-page content than the Readability summary
-
-`web_page_screenshot`
-- Purpose: capture the rendered appearance of one or more pages as full-page images for visual inspection or archival.
-- Use cases: UI verification, citing page layout, sharing what the model saw, or checking visual elements that do not translate well to text extraction.
-- Input (choose one mode):
-  - `{ "url": "https://..." }`
-  - `{ "urls": ["https://...", "https://..."] }`
-  - `{ "ref_id": 1 }` or `{ "ref_ids": [1, 2] }` from the latest `web_search`
-  - optional `format` (`png` | `jpeg`, default `png`)
-  - optional `quality` (1-100, JPEG only)
-  - optional `fullPage` (default `true`)
-- Behavior:
-  - navigates with the same browser profile as other tools, waits for main content to stabilize, then captures `screenshotBase64`
-  - returns metadata including `title`, `url`, `format`, `contentType`, byte size, capture timestamp, and viewport/full-page dimensions
-  - supports multi-target calls with per-item success/error entries similar to `web_open_page`
-
-Recommended agent flow
-1. Call `web_search` with user intent.
-2. Pick best result refs from `results[].ref_id`.
-3. Call `web_open_page` with `ref_id` or `ref_ids`.
-4. Synthesize answer from extracted text.
-
-Need to show what the agent saw? Call `web_page_screenshot` with the same `ref_id`/`ref_ids` to capture the rendered page state as an image.
-
-Notes for agents
-- Ref memory is process-local and resets when server restarts.
-- Prefer `ref_id`/`ref_ids` immediately after a search in the same session.
-
-`web_search` runs all selected engines in parallel and returns an LLM-friendly payload:
-
-- `query`
-- `resultCount`
-- `results[]` with `{ title, url, snippet, llmText }`
-- `directAnswerCount`
-- `directAnswers[]` with `{ source, text, url }`
-- `errors[]` with `{ error }` (if any)
-
-For multiple phrasings of the same intent, pass `queries` (array of strings). The server runs each query across selected engines and returns both per-query and combined results, including aggregated `directAnswers`.
-
-## Docker build and run
-
-Build image:
-
-```bash
-docker build -t browser-search-mcp .
-```
-
-Run container in service mode (for VNC and HTTP helper endpoints):
-
-```bash
-docker run -d --name browser-search-mcp \
-  -e ENABLE_VNC=1 \
-  -e HEADLESS=false \
-  -p 5901:5900 \
-  -p 7901:7900 \
-  -p 3000:3000 \
-  -v chrome_profile_data:/data/chrome \
-  browser-search-mcp
-```
-
-For MCP stdio clients that spawn a new command often (for example one-shot CLI calls), use a landing script that reuses one Docker container:
-
-- Linux/macOS command: `scripts/mcp-stdio-docker.sh`
-- Windows command: `scripts\\mcp-stdio-docker.bat`
-
-What this does:
-
-- creates one named container (`browser-search-mcp-landing`) if missing
-- starts it if stopped
-- runs `node src/mcp-server.js` via `docker exec -i` for stdio transport
-- keeps the same Chrome profile volume mounted across calls
-
-Example MCP client config using the landing script:
+Example client config:
 
 ```json
 {
   "mcpServers": {
-    "web-search": {
-      "command": "C:\\absolute\\path\\to\\browser-search-mcp\\scripts\\mcp-stdio-docker.bat"
+    "browser-search": {
+      "command": "/absolute/path/to/browser-search-mcp/scripts/mcp-stdio-docker.sh"
     }
   }
 }
 ```
 
-Important: stdio transport is process-scoped, so each new client process still starts a new MCP stdio session. The landing script prevents extra Docker containers and preserves browser profile state.
+## MCP Tools
 
-### Using docker-compose
+This server exposes three tools.
 
-```bash
-cp .env.example .env
-docker compose up --build
+### `web_search`
+
+Search the web with one or more browser-backed engines.
+
+This tool is designed to work across a pool of engines and routes rather than relying on a single fragile path.
+
+Example input:
+
+```json
+{ "query": "latest MCP news", "limit": 5 }
 ```
 
-The compose file includes:
+Also supports:
 
-- named volume mounted at `/data/chrome`
-- `HEADLESS`, `ENABLE_VNC`, `CHROME_USER_DATA_DIR`, `CHROME_PROFILE_DIR`, `VNC_PORT`, `NOVNC_PORT`
-- noVNC host mapping `7901:7900`
+- `queries`
+- `engine`
+- `engines`
 
-## noVNC access
+### `web_open_page`
 
-When `ENABLE_VNC=1`, open:
+Open a page and return cleaned readable text.
 
-- `http://localhost:7900/vnc.html` (direct default mapping)
-- `http://localhost:7901/vnc.html` (alternate mapping)
+Under the hood it uses DOM cleanup, Mozilla Readability, and a semantic main-content scoring fallback so the result is usually much cleaner than raw page text.
 
-You can observe/interact with the same Chromium session used by MCP tools.
+Example input:
 
-## Import local Chrome profile into container
+```json
+{ "url": "https://example.com", "maxChars": 8000 }
+```
 
-To clone your local Chrome/Chromium user data dir into the running container:
+Also supports:
+
+- `urls`
+- `ref_id`
+- `ref_ids`
+
+### `web_page_screenshot`
+
+Capture a rendered screenshot of a page.
+
+By default the tool can return base64 image data. If screenshot storage is enabled, it can instead return a local file path, a download link, or both, which is much friendlier for LLM workflows.
+
+Example input:
+
+```json
+{ "url": "https://example.com", "format": "png", "fullPage": true }
+```
+
+Also supports:
+
+- `urls`
+- `ref_id`
+- `ref_ids`
+
+## Main Configuration
+
+The most important environment variables are:
+
+- `ENABLE_HTTP_MCP`: enable HTTP MCP on `/mcp`
+- `ENABLE_STDIO_MCP`: enable stdio transport
+- `MCP_API_PORT`: HTTP server port, default `3000`
+- `HEADLESS`: run browser headless or with UI
+- `CHROME_PATH`: Chromium path for local installs
+- `CHROME_USER_DATA_DIR`: persistent browser profile directory
+- `CHROME_PROFILE_DIR`: Chrome profile subdirectory, default `Default`
+- `PRELAUNCH_BROWSER`: prelaunch browser at startup
+- `BROWSER_OP_TIMEOUT_MS`: browser operation timeout in milliseconds
+- `SEARCH_ENGINES`: comma-separated engine list
+- `ENABLE_VNC`: enable VNC and noVNC in Docker
+
+See `.env.example` for the full list.
+
+## Docker Notes
+
+The included `docker-compose.yml` is the easiest supported deployment path.
+
+It gives you:
+
+- HTTP MCP on port `3000`
+- `/health` for quick checks
+- persistent browser profile storage
+- optional VNC and noVNC access
+
+Stop the service:
+
+```bash
+docker compose down
+```
+
+Rebuild after changes:
+
+```bash
+docker compose up --build -d
+```
+
+## noVNC Access
+
+When `ENABLE_VNC=1`, open one of these in your browser:
+
+- `http://127.0.0.1:7900/vnc.html`
+- `http://127.0.0.1:7901/vnc.html`
+
+This lets you watch or interact with the same browser session used by the MCP tools.
+
+## Import a Local Chrome Profile into Docker
+
+To clone an existing local Chrome or Chromium user data directory into the container volume:
 
 ```bash
 scripts/clone-chrome-userdir.sh --source "/path/to/your/chrome-user-data-dir" --wipe
 ```
 
-Examples for common source paths:
-
-- Linux Chromium: `~/.config/chromium`
-- Linux Chrome: `~/.config/google-chrome`
-- macOS Chrome: `~/Library/Application Support/Google/Chrome`
-
-After import, restart the service:
+Then restart the service:
 
 ```bash
 docker compose restart
 ```
 
-## Environment variables
-
-- `CHROME_PATH` (default: `/usr/bin/chromium`)
-- `CHROME_USER_DATA_DIR` (default: `/data/chrome`)
-- `CHROME_PROFILE_DIR` (default: `Default`)
-- `HEADLESS` (default: `true` unless `DISPLAY` exists)
-- `BROWSER_OP_TIMEOUT_MS` (default: `60000`)
-- `ENABLE_HANG_RESTART` (default: `0`; when `1`, top-level browser operations that exceed hang timeout force process exit for container restart)
-- `HANG_RESTART_TIMEOUT_MS` (default: `120000`; max duration before forced exit when hang restart is enabled)
-- `NAV_WAIT_UNTIL` (default: `domcontentloaded`; valid: `load`, `domcontentloaded`, `networkidle0`, `networkidle2`)
-- `SEARCH_ENGINES` (default: `duckduckgo_api,bing_lp,mojeek_lp,google_ch,duckduckgo_ch`)
-- `SEARCH_ROUTE_CIRCUIT_OPEN_MS` (default: `300000`) route cooldown after a failed engine/backend route
-- `PRELAUNCH_BROWSER` (default: `1`; set `0` to disable prelaunch)
-- `STARTUP_URL` (default: `about:blank`; opened at prelaunch)
-- `ENABLE_VNC` (default: `0`, set `1` to enable Xvfb + VNC + noVNC)
-- `VNC_PORT` (default: `5900`)
-- `NOVNC_PORT` (default: `7900`)
-- `ENABLE_HTTP_HEALTH` (default: `0`)
-- `MCP_API_PORT` (default: `3000`)
-- `MCP_API_HOST` (default: `http://localhost`)
-- `ENABLE_SCREENSHOT_DOWNLOAD_LINK` (default: `0`)
-- `ENABLE_SCREENSHOT_PATH` (default: empty, path where screenshots are stored)
-- `ENABLE_STDIO_MCP` (default: `1`; stdio transport)
-- `ENABLE_HTTP_MCP` (default: `0`; Streamable HTTP transport on `/mcp`)
-- `USE_STICKY_SEARCH_WINDOWS` (default: `1`; reuse per-engine search windows)
-- `STICKY_SEARCH_WINDOW_LIMIT` (default: `10`; max number of sticky search windows kept open)
-- `SEARCH_ENGINE_MAX_PARALLEL_TABS` (default: `10`; max engines processed concurrently)
-- `SEARCH_ENGINE_PER_ENGINE_CONCURRENCY` (default: `10`; max concurrent tasks per engine across requests)
-- `OPEN_PAGE_MAX_PARALLEL` (default: `6`; max URLs opened concurrently per `web_open_page`/`web_page_screenshot`/`/extract` call)
-- `MAX_CONCURRENT_PAGE_OPS` (default: `30`; global page-op budget shared by search and extract)
-
-Notes:
-
-- Sticky search windows are reused opportunistically. If a sticky window for an engine is busy, search falls back to a non-sticky window for that request.
-- `STICKY_SEARCH_WINDOW_LIMIT` limits only the sticky pool; total Chromium windows can be higher under high parallel load.
-
 ## Troubleshooting
 
-### Profile lock recovery
+### `/health` does not respond
 
-If Chromium reports profile lock/in-use errors, the server automatically:
+- Check that the container is running: `docker compose ps`
+- Check logs: `docker compose logs`
+- Make sure port `3000` is free
 
-1. retries after deleting stale lock files (`SingletonLock`, `SingletonCookie`, `SingletonSocket`)
-2. if still locked, clones profile to a temp dir, mirrors `CHROME_PROFILE_DIR` into `Default`, and launches `Default`
+### Browser launch fails
 
-### Browser launch failures
-
-- Verify Chromium exists at `CHROME_PATH`
+- Verify Chromium exists at `CHROME_PATH` for local installs
 - In Docker, keep `CHROME_PATH=/usr/bin/chromium`
-- For sandbox-related failures in restrictive environments, default launch args already include `--no-sandbox` and `--disable-setuid-sandbox`
+- In restrictive environments, the default launch args already include no-sandbox flags
 
-### Timeout tuning
+### Search requests fail sometimes
 
-- Increase `BROWSER_OP_TIMEOUT_MS` for slow pages (e.g. `120000`)
-- Change `NAV_WAIT_UNTIL` to `domcontentloaded` for dynamic pages that never reach `networkidle2`
-- For self-healing in Docker, set `ENABLE_HANG_RESTART=1`; if a top-level browser operation hangs longer than `HANG_RESTART_TIMEOUT_MS`, the process exits and Docker restart policy brings it back
+- Check `/health` for route circuit breaker status
+- Increase `BROWSER_OP_TIMEOUT_MS` if the environment is slow
+- Verify the container has outbound internet access
 
-### Keeping sessions logged in
+### A page never settles
 
-- Run with `HEADLESS=false`, `ENABLE_VNC=1`, and persistent `/data/chrome` volume
-- Login once through noVNC and future MCP requests reuse the same Chromium profile/session
+- Use `NAV_WAIT_UNTIL=domcontentloaded`
+- Increase `BROWSER_OP_TIMEOUT_MS`
+
+### Keep sessions logged in
+
+- Use a persistent browser profile directory
+- In Docker, keep the `chrome_profile_data` volume
+- Use `HEADLESS=false` with `ENABLE_VNC=1` if you want to log in once and reuse the session later
+
+## Development
+
+Run locally:
+
+```bash
+npm install
+npm start
+```
+
+Test MCP integration:
+
+```bash
+npm run test:mcporter
+```
+
+## Security Notes
+
+- This project drives a real browser and can access live web content
+- Be careful before exposing the HTTP endpoint outside a trusted environment
+- Do not commit real credentials or personal browser profiles into the repository
+
+See `SECURITY.md` for reporting guidance.
+
+## Contributing
+
+Contributions are welcome.
+
+See `CONTRIBUTING.md` for setup and pull request guidance.
+
+## License
+
+Licensed under the Apache License 2.0. See `LICENSE`.
