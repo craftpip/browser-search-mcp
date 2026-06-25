@@ -40,10 +40,9 @@ const ENGINE_BACKENDS = {
 };
 const DEFAULT_FALLBACK = [
   "duckduckgo_api",
-  "bing_cb", "bing_lp", "mojeek_lp",
-  "google_cb", "duckduckgo_cb",
-  "google_lp", "duckduckgo_ch",
-  "google_ch"
+  "google_cb", "google_lp",
+  "bing_lp", "duckduckgo_cb", "bing_cb",
+  "google_ch", "duckduckgo_ch", "mojeek_lp"
 ];
 const routeCircuitState = new Map();
 const ENGINE_PAGE_CONFIG = {
