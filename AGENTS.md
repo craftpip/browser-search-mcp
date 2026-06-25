@@ -110,6 +110,32 @@ docker compose down && up -d       # Restart containers
 
 ## Project Learnings
 
+### MCP HTTP Compatibility With Stateless Clients
+
+**Created:** 2026-06-25
+**Last updated:** 2026-06-25
+
+**Trigger:** OpenCode reported the MCP server as down even though the container and `/health` endpoint were healthy.
+
+**Mistake:** Verified only container health and search behavior. The real failure was in `/mcp` POST routing for stateless JSON-RPC clients.
+
+**Root cause:** `src/mcp-server.js` reused an existing `StreamableHTTPServerTransport` for plain `POST /mcp` requests without an `Mcp-Session-Id`. That forced stateless clients onto a session transport and caused errors like `Mcp-Session-Id header is required` or `Not Acceptable`.
+
+**Correct approach:**
+
+1. Check `docker exec <container> curl -s localhost:3000/health` first.
+2. Test stateless MCP directly with `curl` against `POST /mcp` using `tools/list` and `tools/call`.
+3. Test real MCP session flow with an MCP SDK client or `mcporter`, not just direct module calls.
+4. In `src/mcp-server.js`, only route POST requests through an existing streamable transport when the client explicitly sends `Mcp-Session-Id`.
+5. After the fix, verify `web_search`, `web_open_page`, and `web_page_screenshot` through MCP using `url`, `urls`, and `ref_id` inputs.
+
+**Verification:**
+
+- `curl -s http://localhost:3000/mcp -H "Content-Type: application/json" -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'` returns tool metadata.
+- `npx --yes mcporter list local-browser-search --config <config>` succeeds.
+- `npx --yes mcporter call local-browser-search.web_search ...` succeeds.
+- `/health` ends with `pageLimiter.inUse: 0` after page and screenshot tests.
+
 ### Creating a GitHub Release with Proper Notes
 
 **Created:** 2026-06-25

@@ -1259,11 +1259,11 @@ async function maybeStartHttpServer(managerOverride) {
           const reqSum = mcpRequestSummary(body);
 
           {
-            const existingTransport = resolveTransport();
+            // Only bind POST requests to an existing streamable session when the
+            // client explicitly sends an MCP session id. Stateless JSON-RPC
+            // requests should fall through to initialize/stateless handling.
+            const existingTransport = sessionId ? resolveTransport() : null;
             if (existingTransport) {
-              if (!sessionId && existingTransport.sessionId) {
-                req.headers["mcp-session-id"] = existingTransport.sessionId;
-              }
               await existingTransport.handleRequest(req, res, body);
               return;
             }
