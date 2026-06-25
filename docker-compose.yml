@@ -1,5 +1,6 @@
 services:
   browser-search-mcp:
+    container_name: "browser-search-mcp"
     restart: unless-stopped
     build:
       context: .
