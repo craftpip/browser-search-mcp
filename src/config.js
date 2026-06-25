@@ -1,5 +1,7 @@
 import fs from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
@@ -12,7 +14,12 @@ const WAIT_UNTIL_VALUES = new Set([
   "networkidle2"
 ]);
 
-const SEARCH_ENGINE_VALUES = new Set(["bing", "duckduckgo", "google"]);
+const SEARCH_ENGINE_VALUES = new Set([
+  "bing_cb", "bing_lp",
+  "duckduckgo_api", "duckduckgo_cb", "duckduckgo_ch",
+  "google_cb", "google_ch", "google_lp",
+  "mojeek_lp"
+]);
 
 function parseBoolean(value, fallback) {
   if (value === undefined || value === null || value === "") return fallback;
@@ -95,6 +102,77 @@ export async function resolveChromePath() {
   );
 }
 
+export async function findCloakbrowserPath() {
+  const fromEnv = process.env.CLOAKBROWSER_BINARY_PATH;
+  if (fromEnv && (await canAccess(fromEnv))) {
+    return fromEnv;
+  }
+
+  const homeDir = os.homedir?.() || process.env.HOME || "/root";
+  const knownPaths = [
+    `${homeDir}/.cloakbrowser/chromium-146.0.7680.177.5/chrome`,
+    `${homeDir}/.cloakbrowser/chromium-*/chrome`,
+    "/usr/local/bin/cloakbrowser-chrome"
+  ];
+
+  for (const candidate of knownPaths) {
+    if (candidate.includes("*")) {
+      const parts = candidate.split("*");
+      const prefix = parts[0];
+      try {
+        const entries = await fs.readdir(path.dirname(prefix));
+        const matching = entries
+          .filter((entry) => entry.startsWith(path.basename(prefix)))
+          .sort()
+          .reverse();
+        for (const match of matching) {
+          const fullPath = path.join(path.dirname(prefix), match, "chrome");
+          if (await canAccess(fullPath)) return fullPath;
+        }
+      } catch {
+        continue;
+      }
+    } else if (await canAccess(candidate)) {
+      return candidate;
+    }
+  }
+
+  try {
+    const { launch } = await import("cloakbrowser/puppeteer");
+    const { ensureBinary } = await import("cloakbrowser/dist/download.js");
+    const binaryPath = await ensureBinary();
+    return binaryPath;
+  } catch {
+    return null;
+  }
+}
+
+export async function findLightpandaPath() {
+  const fromEnv = process.env.LIGHTPANDA_PATH;
+  if (fromEnv && (await canAccess(fromEnv))) {
+    return fromEnv;
+  }
+
+  const knownPaths = [
+    "/usr/local/bin/lightpanda",
+    "/usr/bin/lightpanda"
+  ];
+
+  for (const candidate of knownPaths) {
+    if (await canAccess(candidate)) {
+      return candidate;
+    }
+  }
+
+  const pathCandidates = ["lightpanda", "stealthpanda"];
+  for (const candidate of pathCandidates) {
+    const resolved = await findExecutableInPath(candidate);
+    if (resolved) return resolved;
+  }
+
+  return null;
+}
+
 const headlessDefault = !process.env.DISPLAY;
 
 export async function loadConfig() {
@@ -115,11 +193,22 @@ export async function loadConfig() {
   );
 
   const chromePath = await resolveChromePath();
+  const lightpandaPath = await findLightpandaPath();
+  const cloakbrowserPath = await findCloakbrowserPath();
 
   return {
     chromePath,
     chromeUserDataDir: process.env.CHROME_USER_DATA_DIR || "/data/chrome",
     chromeProfileDir: process.env.CHROME_PROFILE_DIR || "Default",
+    lightpandaPath,
+    lightpandaPort: parseNumber(process.env.LIGHTPANDA_PORT, 9222),
+    cloakbrowserPath,
+    defaultBackend: (() => {
+      const raw = (process.env.BROWSER_BACKEND || "cloakbrowser").toLowerCase();
+      if (raw === "chromium") return "chromium";
+      if (raw === "cloakbrowser") return "cloakbrowser";
+      return "lightpanda";
+    })(),
     browserOpTimeoutMs: parseNumber(process.env.BROWSER_OP_TIMEOUT_MS, 60000),
     navWaitUntil,
     headless: parseBoolean(process.env.HEADLESS, headlessDefault),
@@ -135,6 +224,7 @@ export async function loadConfig() {
     screenshotPathPrefix: screenshotPathPrefix.trim() || null,
     searchKeepMinWorkingWindows,
     searchMaxWorkingWindows,
+    searchRouteCircuitOpenMs: parseNumber(process.env.SEARCH_ROUTE_CIRCUIT_OPEN_MS, 300000),
     openPageMaxParallel: Math.max(1, Math.min(20, parseInteger(process.env.OPEN_PAGE_MAX_PARALLEL, 6))),
     maxConcurrentPageOps: Math.max(1, Math.min(30, parseInteger(process.env.MAX_CONCURRENT_PAGE_OPS, 30))),
     humanTypingDelay: Math.max(0, Math.min(500, parseInteger(process.env.HUMAN_TYPING_DELAY, 15))),
@@ -142,6 +232,9 @@ export async function loadConfig() {
     enableHangRestart: parseBoolean(process.env.ENABLE_HANG_RESTART, false),
     hangRestartTimeoutMs: parseNumber(process.env.HANG_RESTART_TIMEOUT_MS, 120000),
     startupUrl: process.env.STARTUP_URL || "about:blank",
-    searchEngines: parseEngines(process.env.SEARCH_ENGINES, ["bing", "duckduckgo", "google"])
+    searchRouteWarmupEngines: parseEngines(process.env.SEARCH_ROUTE_WARMUP_ENGINES, ["duckduckgo_api", "google_cb", "google_lp", "bing_lp", "duckduckgo_cb", "bing_cb"]),
+    searchFallback: process.env.SEARCH_FALLBACK
+      ? parseEngines(process.env.SEARCH_FALLBACK, [])
+      : null
   };
 }

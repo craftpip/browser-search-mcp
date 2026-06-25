@@ -1,23 +1,125 @@
 import { getBrowserManager } from "./browser.js";
 import { JSDOM } from "jsdom";
 import { Readability } from "@mozilla/readability";
+import { performance } from "node:perf_hooks";
 
-const SUPPORTED_ENGINES = new Set(["bing", "duckduckgo", "google"]);
+async function waitForContent(page, { pollInterval = 300, stableMs = 500, minChars = 500, maxWait = 4000 } = {}) {
+  const start = Date.now();
+  let lastLength = -1;
+  let lastStable = start;
+
+  while (Date.now() - start < maxWait) {
+    const len = await page.evaluate(() => {
+      const c = document.querySelector("main, article, [role='main'], .content, #content") || document.body;
+      return c ? c.innerText.replace(/\s+/g, " ").trim().length : 0;
+    });
+
+    if (len >= minChars) return;
+    if (len === lastLength) {
+      if (Date.now() - lastStable >= stableMs) return;
+    } else {
+      lastLength = len;
+      lastStable = Date.now();
+    }
+
+    await new Promise((r) => setTimeout(r, pollInterval));
+  }
+}
+
+const SUPPORTED_ENGINES = new Set(["bing_cb", "bing_lp", "duckduckgo_api", "duckduckgo_cb", "duckduckgo_ch", "google_cb", "google_ch", "google_lp", "mojeek_lp"]);
+const ENGINE_BACKENDS = {
+  bing_cb: "cloakbrowser",
+  bing_lp: "lightpanda",
+  duckduckgo_api: "http",
+  duckduckgo_cb: "cloakbrowser",
+  duckduckgo_ch: "chromium",
+  google_cb: "cloakbrowser",
+  google_ch: "chromium",
+  google_lp: "lightpanda",
+  mojeek_lp: "lightpanda"
+};
+const DEFAULT_FALLBACK = [
+  "duckduckgo_api",
+  "google_lp", "google_cb", "duckduckgo_cb", "bing_cb",
+  "bing_lp", "google_ch", "duckduckgo_ch", "mojeek_lp"
+];
+const routeCircuitState = new Map();
 const ENGINE_PAGE_CONFIG = {
-  duckduckgo: {
+  duckduckgo_ch: {
     homeUrl: "https://duckduckgo.com/",
+    searchUrl: (q) => `https://duckduckgo.com/`,
     inputSelectors: ["input[name='q']", "input#searchbox_input", "input[data-testid='searchbox-input']"],
-    resultSelectors: ["article[data-testid='result']", ".result", "#links"]
+    resultSelectors: [
+      "article[data-testid='result']",
+      "#links .result",
+      ".results .result",
+      ".result",
+      "#search_results"
+    ]
   },
-  google: {
+  google_ch: {
     homeUrl: "https://www.google.com/",
+    searchUrl: (q) => `https://www.google.com/search?q=${encodeURIComponent(q)}&hl=en&udm=14`,
     inputSelectors: ["textarea[name='q']", "input[name='q']"],
-    resultSelectors: ["#search", "#search .MjjYud", "#search .g"]
+    resultSelectors: [
+      "#search",
+      "#search .MjjYud",
+      "#search .g",
+      "#rso",
+      ".srg",
+      ".g",
+      "#rcnt"
+    ]
   },
-  bing: {
+  google_cb: {
+    homeUrl: "https://www.google.com/",
+    searchUrl: (q) => `https://www.google.com/search?q=${encodeURIComponent(q)}&hl=en&udm=14`,
+    inputSelectors: ["textarea[name='q']", "input[name='q']"],
+    resultSelectors: [
+      "#search",
+      "#search .MjjYud",
+      "#search .g",
+      "#rso",
+      ".srg",
+      ".g",
+      "#rcnt"
+    ]
+  },
+  duckduckgo_cb: {
+    homeUrl: "https://duckduckgo.com/",
+    searchUrl: (q) => `https://duckduckgo.com/`,
+    inputSelectors: ["input[name='q']", "input#searchbox_input", "input[data-testid='searchbox-input']"],
+    resultSelectors: [
+      "article[data-testid='result']",
+      "#links .result",
+      ".results .result",
+      ".result",
+      "#search_results"
+    ]
+  },
+  bing_cb: {
     homeUrl: "https://www.bing.com/",
+    searchUrl: (q) => `https://www.bing.com/search?q=${encodeURIComponent(q)}`,
     inputSelectors: ["textarea[name='q']", "input[name='q']", "input#sb_form_q"],
     resultSelectors: ["#b_results", "#b_results li.b_algo"]
+  },
+  google_lp: {
+    homeUrl: "https://www.google.com/",
+    searchUrl: (q) => `https://www.google.com/search?q=${encodeURIComponent(q)}&hl=en&udm=14`,
+    inputSelectors: ["textarea[name='q']", "input[name='q']"],
+    resultSelectors: ["#search", "#rso", ".g", "#rcnt"]
+  },
+  bing_lp: {
+    homeUrl: "https://www.bing.com/",
+    searchUrl: (q) => `https://www.bing.com/search?q=${encodeURIComponent(q)}`,
+    inputSelectors: ["textarea[name='q']", "input[name='q']", "input#sb_form_q"],
+    resultSelectors: ["#b_results", "#b_results li.b_algo"]
+  },
+  mojeek_lp: {
+    homeUrl: "https://www.mojeek.com/",
+    searchUrl: (q) => `https://www.mojeek.com/search?q=${encodeURIComponent(q)}`,
+    inputSelectors: ["input[name='q']", "input.js-search-input"],
+    resultSelectors: [".results-standard", ".results-standard li", ".serp-results", ".results"]
   }
 };
 
@@ -63,15 +165,69 @@ function normalizeUrl(rawUrl) {
       const redirect = parsed.searchParams.get("q");
       if (redirect) return redirect;
     }
+    if (parsed.hostname.includes("duckduckgo.") && parsed.pathname === "/l/") {
+      const redirect = parsed.searchParams.get("uddg");
+      if (redirect) return redirect;
+    }
     return parsed.toString();
   } catch {
     return "";
   }
 }
 
+function routeKey(engine) {
+  return `${engine}/${ENGINE_BACKENDS[engine] || "browser"}`;
+}
+
+function getRouteCircuit(engine, now = Date.now()) {
+  const key = routeKey(engine);
+  const state = routeCircuitState.get(key);
+  if (!state) {
+    return { key, state: "closed", open: false, remainingMs: 0 };
+  }
+  const remainingMs = Math.max(0, state.openUntil - now);
+  if (remainingMs <= 0) {
+    return { key, state: "half_open", open: false, remainingMs: 0, lastError: state.lastError };
+  }
+  return { key, state: "open", open: true, remainingMs, lastError: state.lastError };
+}
+
+function recordRouteSuccess(engine) {
+  routeCircuitState.delete(routeKey(engine));
+}
+
+function recordRouteFailure(engine, error, cooldownMs) {
+  const key = routeKey(engine);
+  const previous = routeCircuitState.get(key);
+  routeCircuitState.set(key, {
+    openUntil: Date.now() + cooldownMs,
+    failures: (previous?.failures || 0) + 1,
+    lastError: String(error?.message || error || "Unknown route failure"),
+    lastFailureAt: new Date().toISOString()
+  });
+}
+
+export function getSearchBackendHealth() {
+  const now = Date.now();
+  return [...routeCircuitState.entries()].map(([key, state]) => {
+    const remainingMs = Math.max(0, state.openUntil - now);
+    return {
+      route: key,
+      state: remainingMs > 0 ? "open" : "half_open",
+      remainingMs,
+      failures: state.failures || 0,
+      lastError: state.lastError || "",
+      lastFailureAt: state.lastFailureAt || ""
+    };
+  });
+}
+
 function normalizeEngines(engines, fallback) {
   const input = Array.isArray(engines) ? engines : [engines].filter(Boolean);
   const requested = input.map((item) => String(item).trim().toLowerCase()).filter(Boolean);
+  if (requested.includes("select_best")) {
+    return fallback;
+  }
   const normalized = input
     .map((item) => String(item).trim().toLowerCase())
     .filter((item) => SUPPORTED_ENGINES.has(item));
@@ -479,11 +635,30 @@ async function captureSeoSnapshot(
           return segments.join(" > ");
         };
 
-        const shouldSkipNode = (pathLower, roleAttr = "") => {
-          if (!pathLower) return false;
-          if (roleAttr && /(navigation|banner|contentinfo|complementary)/.test(roleAttr)) return true;
-          return /(footer|nav|subscribe|cookie|legal|banner|header|menu|signin|login)/.test(pathLower);
-        };
+          const shouldSkipNode = (pathLower, roleAttr = "") => {
+            if (!pathLower) return false;
+            if (roleAttr && /(navigation|banner|contentinfo|complementary)/.test(roleAttr)) return true;
+            if (/(footer|nav|subscribe|cookie|legal|banner|header|signin|login)/.test(pathLower)) return true;
+            return false;
+          };
+
+          const isLikelyNavText = (text) => {
+            const lower = text.toLowerCase();
+            const navSignals = ["sign in", "subscribe", "log in", "register", "menu", "cookie", "privacy policy", "terms of service", "follow us", "newsletter", "ad choices"];
+            let hits = 0;
+            for (const signal of navSignals) {
+              if (lower.includes(signal)) hits++;
+            }
+            return hits;
+          };
+
+          const getTagBoost = (el) => {
+            const tag = (el.tagName || "").toLowerCase();
+            if (tag === "article") return 1500;
+            if (tag === "main") return 800;
+            if (tag === "section") return 400;
+            return 0;
+          };
 
         const computeDepth = (node) => {
           let depth = 0;
@@ -537,13 +712,17 @@ async function captureSeoSnapshot(
           const bottomEdge = rectTop + (rect?.height || 0);
           const normalizedBottom = documentHeight ? bottomEdge / documentHeight : normalizedTop;
           const bottomPenalty = normalizedBottom > 0.9 ? (normalizedBottom - 0.9) * 1500 : 0;
+          const tagBoost = getTagBoost(el);
+          const navPenalty = isLikelyNavText(text) * 300;
 
           const score =
             text.length +
             headingWeight * 250 -
             linkDensity * 400 +
             Math.max(0, 300 - depth * 20) +
-            sizeScore -
+            sizeScore +
+            tagBoost -
+            navPenalty -
             viewportPenalty -
             bottomPenalty;
 
@@ -720,54 +899,316 @@ async function waitForAnySelector(page, selectors, timeout) {
   throw new Error(`Could not resolve any selector: ${selectors.join(", ")}`);
 }
 
+async function fetchTextWithTimeout(url, options, timeoutMs) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), Math.max(1000, timeoutMs));
+  try {
+    const response = await fetch(url, {
+      ...options,
+      signal: controller.signal
+    });
+    const text = await response.text();
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status} from ${url}: ${text.slice(0, 160)}`);
+    }
+    return text;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+function collectDuckDuckGoInstantAnswers(payload) {
+  const answers = [];
+  const sourceUrl = cleanWhitespace(payload?.AbstractURL || payload?.AbstractSource || "https://duckduckgo.com/");
+  if (payload?.Answer) {
+    answers.push({ source: "instant_answer", text: payload.Answer, url: sourceUrl });
+  }
+  if (payload?.AbstractText) {
+    answers.push({ source: "abstract", text: payload.AbstractText, url: sourceUrl });
+  }
+  if (payload?.Definition) {
+    answers.push({ source: "definition", text: payload.Definition, url: sourceUrl });
+  }
+
+  const related = Array.isArray(payload?.RelatedTopics) ? payload.RelatedTopics : [];
+  for (const item of related.slice(0, 5)) {
+    if (item?.Text) {
+      answers.push({ source: "related_topic", text: item.Text, url: cleanWhitespace(item.FirstURL || sourceUrl) });
+      continue;
+    }
+    if (Array.isArray(item?.Topics)) {
+      for (const topic of item.Topics.slice(0, 2)) {
+        if (topic?.Text) {
+          answers.push({ source: "related_topic", text: topic.Text, url: cleanWhitespace(topic.FirstURL || sourceUrl) });
+        }
+      }
+    }
+  }
+  return dedupeDirectAnswers(answers);
+}
+
+function parseDuckDuckGoHtmlResults(html) {
+  const safeHtml = String(html || "");
+  const dom = new JSDOM(safeHtml, { url: "https://html.duckduckgo.com/html/" });
+  try {
+    const rows = Array.from(dom.window.document.querySelectorAll(".result.results_links, .result"));
+    const results = rows
+      .map((row) => {
+        const anchor = row.querySelector("a.result__a") || row.querySelector(".result__title a") || row.querySelector("h2 a");
+        const snippetEl = row.querySelector(".result__snippet");
+        return {
+          title: cleanWhitespace(anchor?.textContent || ""),
+          url: normalizeUrl(anchor?.href || ""),
+          snippet: cleanWhitespace(snippetEl?.textContent || "")
+        };
+      })
+      .filter((item) => item.title && item.url);
+
+    if (results.length) return results;
+
+    if (/anomaly-modal|anomaly|captcha|unusual traffic|bot/i.test(safeHtml)) {
+      throw new Error("DuckDuckGo HTTP returned a bot/anomaly page without usable results");
+    }
+
+    return results;
+  } finally {
+    dom.window.close();
+  }
+}
+
+async function runDuckDuckGoHttpSearch({ query, engine, config }) {
+  const t0 = performance.now();
+  const timeoutMs = Math.min(config.browserOpTimeoutMs, 15000);
+  const headers = {
+    "user-agent": config.userAgent,
+    "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "content-type": "application/x-www-form-urlencoded"
+  };
+
+  const htmlPromise = fetchTextWithTimeout(
+    "https://html.duckduckgo.com/html/",
+    {
+      method: "POST",
+      headers,
+      body: new URLSearchParams({ q: query }).toString()
+    },
+    timeoutMs
+  );
+  const answerPromise = fetchTextWithTimeout(
+    `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1&skip_disambig=1`,
+    { headers: { "user-agent": config.userAgent, "accept": "application/json" } },
+    timeoutMs
+  ).catch(() => "");
+
+  const [html, answerText] = await Promise.all([htmlPromise, answerPromise]);
+  const results = parseDuckDuckGoHtmlResults(html).map((item) => ({ ...item, engine }));
+  let directAnswers = [];
+  if (answerText) {
+    try {
+      directAnswers = collectDuckDuckGoInstantAnswers(JSON.parse(answerText)).map((item) => ({ ...item, engine }));
+    } catch {
+      directAnswers = [];
+    }
+  }
+
+  const t1 = performance.now();
+  console.error(`⏱️  ${engine}: http_total=${Math.round(t1 - t0)}ms`);
+  return { results, directAnswers };
+}
+
 async function submitSearchFromHomepage({ page, query, engine, config }) {
   const engineConfig = ENGINE_PAGE_CONFIG[engine];
 
-  await page.goto(engineConfig.homeUrl, {
+  await page.goto(engineConfig.searchUrl(query), {
     waitUntil: "domcontentloaded",
     timeout: config.browserOpTimeoutMs
   });
 
-  const input = await waitForAnySelector(page, engineConfig.inputSelectors, config.browserOpTimeoutMs);
-  await input.click({ clickCount: 3 });
-  await page.keyboard.press("Backspace");
-  await input.type(query, { delay: config.humanTypingDelay });
-
-  await input.press("Enter");
-
-  const settledBy = await Promise.race([
-    page
-      .waitForNavigation({
-        waitUntil: "domcontentloaded",
-        timeout: config.browserOpTimeoutMs
-      })
-      .then(() => "navigation")
-      .catch(() => null),
-    waitForAnySelector(page, engineConfig.resultSelectors, config.browserOpTimeoutMs).then(() => "results")
-  ]);
-
-  if (settledBy !== "results") {
+  // DuckDuckGo shows homepage skeleton with ?q=, not results — need to submit the form
+  if (engine === "duckduckgo_ch" || engine === "duckduckgo_cb") {
+    await page.waitForSelector(engineConfig.inputSelectors.join(","), {
+      timeout: config.browserOpTimeoutMs
+    });
+    await page.evaluate((q) => {
+      const input = document.querySelector("input[name='q'], input#searchbox_input, input[data-testid='searchbox-input']");
+      if (input) {
+        input.value = q;
+        const form = input.closest("form");
+        if (form) form.submit();
+      }
+    }, query);
+    // Wait for navigation to complete after form submit
+    await page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: config.browserOpTimeoutMs }).catch(() => {});
     await waitForAnySelector(page, engineConfig.resultSelectors, config.browserOpTimeoutMs);
+    return;
   }
+
+  await page.waitForSelector("body", { timeout: config.browserOpTimeoutMs }).catch(() => {});
+  await new Promise((r) => setTimeout(r, 500));
+  await waitForAnySelector(page, engineConfig.resultSelectors, config.browserOpTimeoutMs);
 }
 
 async function runSearchEngine({ manager, query, engine, config }) {
-  const page = await manager.acquireSearchWindow(engine, {
-    startupUrl: ENGINE_PAGE_CONFIG[engine].homeUrl,
-    waitUntil: "domcontentloaded"
-  });
+  if (ENGINE_BACKENDS[engine] === "http") {
+    return runDuckDuckGoHttpSearch({ query, engine, config });
+  }
+
+  const t0 = performance.now();
+  const page = await manager.acquireSearchWindow(engine);
+  const t1 = performance.now();
 
   try {
     await submitSearchFromHomepage({ page, query, engine, config });
+    const t2 = performance.now();
 
-    if (engine === "duckduckgo") {
-      const payload = await page.evaluate(() => {
-        const rows = Array.from(document.querySelectorAll("article[data-testid='result'], .result"));
-        const results = rows.map((row) => {
-          const anchor = row.querySelector("a[data-testid='result-title-a'], h2 a, a.result__a");
-          const snippetEl = row.querySelector(
-            "[data-result='snippet'], .result__snippet, .result-snippet"
+    async function extractResults() {
+      if (engine === "duckduckgo_ch" || engine === "duckduckgo_cb") {
+        const payload = await page.evaluate(() => {
+          const rows = Array.from(document.querySelectorAll("article[data-testid='result'], .result"));
+          const results = rows.map((row) => {
+            const anchor = row.querySelector("a[data-testid='result-title-a'], h2 a, a.result__a");
+            const snippetEl = row.querySelector(
+              "[data-result='snippet'], .result__snippet, .result-snippet"
+            );
+            return {
+              title: anchor?.textContent || "",
+              url: anchor?.href || "",
+              snippet: snippetEl?.textContent || ""
+            };
+          });
+
+          const answerNodes = [
+            ...document.querySelectorAll("[data-testid='instant-answer']"),
+            ...document.querySelectorAll(".zci__answer, .zci__result, .module__body")
+          ];
+          const directAnswers = answerNodes.map((node) => ({
+            source: "instant_answer",
+            text: node?.textContent || ""
+          }));
+
+          return { results, directAnswers };
+        });
+
+        return {
+          results: payload.results.map((item) => ({ ...item, engine })),
+          directAnswers: dedupeDirectAnswers(
+            (payload.directAnswers || []).map((item) => ({ ...item, engine, url: page.url() }))
+          )
+        };
+      }
+
+      if (engine === "google_chromium" || engine === "google_cb" || engine === "google_ch") {
+        const payload = await page.evaluate(() => {
+          const rows = Array.from(document.querySelectorAll("#search .MjjYud, #search .g"));
+          const results = rows.map((row) => {
+            const anchor = row.querySelector("a:has(h3)") || row.querySelector("h3")?.closest("a");
+            const heading = row.querySelector("h3");
+            const snippetEl = row.querySelector(".VwiC3b, [data-sncf], div[data-content-feature='1']");
+
+            return {
+              title: heading?.textContent || "",
+              url: anchor?.href || "",
+              snippet: snippetEl?.textContent || ""
+            };
+          });
+
+          const answerNodes = [
+            ...document.querySelectorAll("#search .kno-rdesc span, #search [data-attrid='wa:/description']"),
+            ...document.querySelectorAll("#search .hgKElc, #search .IZ6rdc, #search .V3FYCf")
+          ];
+          const directAnswers = answerNodes.map((node) => ({
+            source: "direct_answer",
+            text: node?.textContent || ""
+          }));
+
+          return { results, directAnswers };
+        });
+
+        return {
+          results: payload.results.map((item) => ({ ...item, engine })),
+          directAnswers: dedupeDirectAnswers(
+            (payload.directAnswers || []).map((item) => ({ ...item, engine, url: page.url() }))
+          )
+        };
+      }
+
+      if (engine === "google_lp") {
+        const payload = await page.evaluate(() => {
+          const rows = Array.from(
+            document.querySelectorAll("#search .g, #rso .g, .MjjYud")
           );
+          const results = rows.map((row) => {
+            const anchor = row.querySelector("a[jsname] h3")?.closest("a") ||
+                           row.querySelector("h3 a, a h3") ||
+                           row.querySelector("a");
+            const heading = row.querySelector("h3");
+            const snippetEl = row.querySelector(
+              ".VwiC3b, .st, span.aCOpRe, [data-sncf]"
+            );
+            return {
+              title: heading?.textContent || "",
+              url: anchor?.href || "",
+              snippet: snippetEl?.textContent || ""
+            };
+          });
+
+          const answerNodes = document.querySelectorAll(
+            ".kno-rdesc span, [data-attrid='wa:/description'], .hgKElc"
+          );
+          const directAnswers = Array.from(answerNodes).map((node) => ({
+            source: "direct_answer",
+            text: node?.textContent || ""
+          }));
+
+          return { results, directAnswers };
+        });
+
+        return {
+          results: payload.results.map((item) => ({ ...item, engine })),
+          directAnswers: dedupeDirectAnswers(
+            (payload.directAnswers || []).map((item) => ({ ...item, engine, url: page.url() }))
+          )
+        };
+      }
+
+      if (engine === "mojeek_lp") {
+        const payload = await page.evaluate(() => {
+          const rows = Array.from(document.querySelectorAll(".results-standard li"));
+          const results = rows.map((row) => {
+            const anchor = row.querySelector("h2 a.title") || row.querySelector("h2 a") || row.querySelector("a.title");
+            const snippetEl = row.querySelector("p.s");
+
+            return {
+              title: anchor?.textContent || "",
+              url: anchor?.href || "",
+              snippet: snippetEl?.textContent || ""
+            };
+          });
+
+          const directAnswers = Array.from(document.querySelectorAll(".infobox p"))
+            .map((node) => ({
+              source: "infobox",
+              text: node?.textContent || ""
+            }));
+
+          return { results, directAnswers };
+        });
+
+        return {
+          results: payload.results.map((item) => ({ ...item, engine })),
+          directAnswers: dedupeDirectAnswers(
+            (payload.directAnswers || []).map((item) => ({ ...item, engine, url: page.url() }))
+          )
+        };
+      }
+
+      const payload = await page.evaluate(() => {
+        const rows = Array.from(document.querySelectorAll("#b_results li.b_algo"));
+        const results = rows.map((row) => {
+          const anchor = row.querySelector("h2 a") || row.querySelector("a");
+          const snippetEl =
+            row.querySelector(".b_caption p") || row.querySelector(".b_snippet") || row.querySelector("p");
+
           return {
             title: anchor?.textContent || "",
             url: anchor?.href || "",
@@ -776,43 +1217,8 @@ async function runSearchEngine({ manager, query, engine, config }) {
         });
 
         const answerNodes = [
-          ...document.querySelectorAll("[data-testid='instant-answer']"),
-          ...document.querySelectorAll(".zci__answer, .zci__result, .module__body")
-        ];
-        const directAnswers = answerNodes.map((node) => ({
-          source: "instant_answer",
-          text: node?.textContent || ""
-        }));
-
-        return { results, directAnswers };
-      });
-
-      return {
-        results: payload.results.map((item) => ({ ...item, engine })),
-        directAnswers: dedupeDirectAnswers(
-          (payload.directAnswers || []).map((item) => ({ ...item, engine, url: page.url() }))
-        )
-      };
-    }
-
-    if (engine === "google") {
-      const payload = await page.evaluate(() => {
-        const rows = Array.from(document.querySelectorAll("#search .MjjYud, #search .g"));
-        const results = rows.map((row) => {
-          const anchor = row.querySelector("a:has(h3)") || row.querySelector("h3")?.closest("a");
-          const heading = row.querySelector("h3");
-          const snippetEl = row.querySelector(".VwiC3b, [data-sncf], div[data-content-feature='1']");
-
-          return {
-            title: heading?.textContent || "",
-            url: anchor?.href || "",
-            snippet: snippetEl?.textContent || ""
-          };
-        });
-
-        const answerNodes = [
-          ...document.querySelectorAll("#search .kno-rdesc span, #search [data-attrid='wa:/description']"),
-          ...document.querySelectorAll("#search .hgKElc, #search .IZ6rdc, #search .V3FYCf")
+          ...document.querySelectorAll(".b_ans .b_focusTextLarge, .b_ans .b_paractl, .b_ans .b_snippet"),
+          ...document.querySelectorAll("#b_results .b_entityTP .b_snippet")
         ];
         const directAnswers = answerNodes.map((node) => ({
           source: "direct_answer",
@@ -830,46 +1236,182 @@ async function runSearchEngine({ manager, query, engine, config }) {
       };
     }
 
-    const payload = await page.evaluate(() => {
-      const rows = Array.from(document.querySelectorAll("#b_results li.b_algo"));
-      const results = rows.map((row) => {
-        const anchor = row.querySelector("h2 a") || row.querySelector("a");
-        const snippetEl =
-          row.querySelector(".b_caption p") || row.querySelector(".b_snippet") || row.querySelector("p");
+    const result = await extractResults();
+    const t3 = performance.now();
 
-        return {
-          title: anchor?.textContent || "",
-          url: anchor?.href || "",
-          snippet: snippetEl?.textContent || ""
-        };
-      });
+    console.error(`⏱️  ${engine}: acquire_window=${Math.round(t1 - t0)}ms → search_submit=${Math.round(t2 - t1)}ms → extract_results=${Math.round(t3 - t2)}ms | total=${Math.round(t3 - t0)}ms`);
 
-      const answerNodes = [
-        ...document.querySelectorAll(".b_ans .b_focusTextLarge, .b_ans .b_paractl, .b_ans .b_snippet"),
-        ...document.querySelectorAll("#b_results .b_entityTP .b_snippet")
-      ];
-      const directAnswers = answerNodes.map((node) => ({
-        source: "direct_answer",
-        text: node?.textContent || ""
-      }));
-
-      return { results, directAnswers };
-    });
-
-    return {
-      results: payload.results.map((item) => ({ ...item, engine })),
-      directAnswers: dedupeDirectAnswers(
-        (payload.directAnswers || []).map((item) => ({ ...item, engine, url: page.url() }))
-      )
-    };
+    return result;
   } finally {
     await manager.releaseSearchWindow(engine, page);
   }
 }
 
+function routeConcurrencyForEngines(engines, config) {
+  const hasLightpandaRoute = engines.some((engine) => ENGINE_BACKENDS[engine] === "lightpanda");
+  if (hasLightpandaRoute && config.defaultBackend !== "chromium" && config.defaultBackend !== "cloakbrowser") return 1;
+  return Math.max(1, engines.length);
+}
+
+async function runSearchRoute({ manager, query, engine, config, explicit }) {
+  const circuit = getRouteCircuit(engine);
+  if (circuit.open) {
+    throw new Error(`Search route ${circuit.key} is temporarily disabled for ${Math.ceil(circuit.remainingMs / 1000)}s: ${circuit.lastError || "previous failure"}`);
+  }
+
+  try {
+    const value = await manager.withPageSlot(() =>
+      runSearchEngine({
+        manager,
+        query,
+        engine,
+        config
+      })
+    );
+    recordRouteSuccess(engine);
+    return value;
+  } catch (error) {
+    recordRouteFailure(engine, error, config.searchRouteCircuitOpenMs);
+    if (explicit) throw error;
+    throw error;
+  }
+}
+
+async function runExplicitEngineGroup({ manager, query, engines, limit, config }) {
+  const settled = await mapWithConcurrency(
+    engines,
+    routeConcurrencyForEngines(engines, config),
+    async (engine) => {
+      try {
+        const value = await runSearchRoute({ manager, query, engine, config, explicit: true });
+        return { status: "fulfilled", value, engine };
+      } catch (reason) {
+        return { status: "rejected", reason, engine };
+      }
+    }
+  );
+
+  return buildQueryResult({ query, settled, limit, fallbackAttempted: false });
+}
+
+async function runFallbackEngineGroups({ manager, query, limit, config }) {
+  const errors = [];
+  const skipped = [];
+
+  const engines = (config.searchFallback?.length ? config.searchFallback : DEFAULT_FALLBACK);
+
+  for (const engine of engines) {
+    const circuit = getRouteCircuit(engine);
+    if (circuit.open) {
+      skipped.push({ engine, route: circuit.key, remainingMs: circuit.remainingMs, error: circuit.lastError || "route open" });
+      continue;
+    }
+
+    try {
+      const value = await runSearchRoute({ manager, query, engine, config, explicit: false });
+      const settled = [{ status: "fulfilled", value, engine }];
+      const result = buildQueryResult({ query, settled, limit, fallbackAttempted: true });
+
+      if (skipped.length || errors.length) {
+        const parts = [];
+        if (skipped.length) {
+          parts.push(`skipped: ${skipped.map((s) => `${s.engine}(${s.route})`).join(", ")}`);
+        }
+        if (errors.length) {
+          parts.push(`failed: ${errors.map((e) => `${e.engine}(${e.route})`).join(", ")}`);
+        }
+        console.error(`🔁  ${query}: ${parts.join("; ")}`);
+      }
+
+      return {
+        ...result,
+        errors,
+        fallback: {
+          used: true,
+          selectedEngine: engine,
+          skipped,
+          ...(config.searchFallback?.length ? { configuredFallback: config.searchFallback } : {})
+        }
+      };
+    } catch (reason) {
+      errors.push({ engine, route: routeKey(engine), error: String(reason?.message || reason) });
+    }
+  }
+
+  const skipParts = [];
+  if (skipped.length) {
+    skipParts.push(`skipped: ${skipped.map((s) => `${s.engine}(${s.route})`).join(", ")}`);
+  }
+  if (errors.length) {
+    skipParts.push(`failed: ${errors.map((e) => `${e.engine}(${e.route})`).join(", ")}`);
+  }
+  if (skipParts.length) {
+    console.error(`🔁  ${query}: ${skipParts.join("; ")}`);
+  }
+
+  return {
+    query,
+    resultCount: 0,
+    results: [],
+    directAnswerCount: 0,
+    directAnswers: [],
+    errors,
+    fallback: {
+      used: true,
+      selectedEngine: null,
+      skipped
+    }
+  };
+}
+
+function buildQueryResult({ query, settled, limit, fallbackAttempted }) {
+  const allResults = [];
+  const allDirectAnswers = [];
+  const errors = [];
+
+  for (const entry of settled) {
+    if (entry.status === "fulfilled") {
+      allResults.push(...(entry.value.results || []));
+      allDirectAnswers.push(...(entry.value.directAnswers || []));
+    } else {
+      errors.push({
+        engine: entry.engine,
+        route: entry.engine ? routeKey(entry.engine) : undefined,
+        error: String(entry.reason?.message || entry.reason)
+      });
+    }
+  }
+
+  const engineCounts = {};
+  for (const r of allResults) {
+    engineCounts[r.engine] = (engineCounts[r.engine] || 0) + 1;
+  }
+  const engineParts = Object.entries(engineCounts)
+    .sort((a, b) => b[1] - a[1])
+    .map(([e, c]) => `${e}=${c}`);
+  if (engineParts.length) {
+    console.error(`📊  ${query}: ${engineParts.join(", ")}`);
+  }
+
+  const results = dedupeAndMergeResults(allResults, limit);
+  const directAnswers = dedupeDirectAnswers(allDirectAnswers);
+  return {
+    query,
+    resultCount: results.length,
+    results,
+    directAnswerCount: directAnswers.length,
+    directAnswers,
+    errors,
+    ...(fallbackAttempted ? { fallbackAttempted: true } : {})
+  };
+}
+
 export async function browserSearch({ query, queries, limit = 5, engines }) {
   const manager = await getBrowserManager();
-  const selectedEngines = normalizeEngines(engines, manager.config.searchEngines);
+  const explicitEngines = Array.isArray(engines)
+    ? engines.length > 0
+    : engines !== undefined && engines !== null && String(engines).trim() !== "";
+  const selectedEngines = explicitEngines ? normalizeEngines(engines, []) : [];
 
   const queryList = [];
   if (typeof query === "string") {
@@ -895,54 +1437,11 @@ export async function browserSearch({ query, queries, limit = 5, engines }) {
     throw new Error("Missing query/queries: provide at least one search query");
   }
 
-  const perQueryTasks = uniqueQueries.map(async (singleQuery) => {
-    const settled = await mapWithConcurrency(
-      selectedEngines,
-      selectedEngines.length,
-      async (engine) => {
-        try {
-          const value = await manager.withPageSlot(() =>
-            runSearchEngine({
-              manager,
-              query: singleQuery,
-              engine,
-              config: manager.config
-            })
-          );
-          return { status: "fulfilled", value };
-        } catch (reason) {
-          return { status: "rejected", reason };
-        }
-      }
-    );
-
-    const allResults = [];
-    const allDirectAnswers = [];
-    const errors = [];
-
-    for (let index = 0; index < settled.length; index += 1) {
-      const entry = settled[index];
-      if (entry.status === "fulfilled") {
-        allResults.push(...(entry.value.results || []));
-        allDirectAnswers.push(...(entry.value.directAnswers || []));
-      } else {
-        errors.push({
-          error: String(entry.reason?.message || entry.reason)
-        });
-      }
-    }
-
-    const results = dedupeAndMergeResults(allResults, limit);
-    const directAnswers = dedupeDirectAnswers(allDirectAnswers);
-    return {
-      query: singleQuery,
-      resultCount: results.length,
-      results,
-      directAnswerCount: directAnswers.length,
-      directAnswers,
-      errors
-    };
-  });
+  const perQueryTasks = uniqueQueries.map((singleQuery) =>
+    explicitEngines
+      ? runExplicitEngineGroup({ manager, query: singleQuery, engines: selectedEngines, limit, config: manager.config })
+      : runFallbackEngineGroups({ manager, query: singleQuery, limit, config: manager.config })
+  );
 
   const queryResults = await Promise.all(perQueryTasks);
 
@@ -953,7 +1452,9 @@ export async function browserSearch({ query, queries, limit = 5, engines }) {
       results: queryResults[0].results,
       directAnswerCount: queryResults[0].directAnswerCount,
       directAnswers: queryResults[0].directAnswers,
-      errors: queryResults[0].errors
+      errors: queryResults[0].errors,
+      ...(queryResults[0].fallback ? { fallback: queryResults[0].fallback } : {}),
+      ...(queryResults[0].fallbackAttempted ? { fallbackAttempted: true } : {})
     };
   }
 
@@ -998,7 +1499,7 @@ export async function browserOpenAndExtract({ url, maxChars = 8000, includeSeoAn
   const manager = await getBrowserManager();
 
   return manager.withPageSlot(async () => {
-    const page = await manager.newPage();
+    const page = await manager.newPage({ backend: "cloakbrowser" });
     const operationTimeoutMs = Math.max(1000, Number(manager.config.browserOpTimeoutMs) || 60000);
 
     const withPageTimeout = async (label, task) => {
@@ -1033,20 +1534,7 @@ export async function browserOpenAndExtract({ url, maxChars = 8000, includeSeoAn
         })
       );
 
-      await withPageTimeout("wait_for_content", () =>
-        page
-          .waitForFunction(
-            () => {
-              const container =
-                document.querySelector("main, article, [role='main'], .content, #content") || document.body;
-              if (!container) return false;
-              const text = container.innerText || "";
-              return text.replace(/\s+/g, " ").trim().length > 200;
-            },
-            { timeout: Math.min(10000, manager.config.browserOpTimeoutMs) }
-          )
-          .catch(() => null)
-      );
+      await waitForContent(page, { maxWait: 5000 }).catch(() => {});
 
       const seoSnapshot =
         includeSeoAnalysis === false
@@ -1062,6 +1550,27 @@ export async function browserOpenAndExtract({ url, maxChars = 8000, includeSeoAn
       const [html, resolvedUrl, pageTitle] = await withPageTimeout("serialize_html", () =>
         Promise.all([page.content(), Promise.resolve(page.url()), page.title()])
       );
+
+      const botChallenge = await withPageTimeout("check_bot", () =>
+        page.evaluate(() => {
+          const title = document.title || "";
+          const bodyText = (document.body?.innerText || "").trim();
+          const html = (document.documentElement?.outerHTML || "").toLowerCase();
+          if (html.includes("cf-browser-verification") || html.includes("__cf_challenge")) return "Cloudflare challenge";
+          if (html.includes("data-dome") || bodyText.includes("Please enable JS") || bodyText.includes("disable any ad blocker")) return "DataDome challenge";
+          if (!title || /^[a-z0-9-]+\.[a-z]{2,}$/i.test(title)) return `Bot block detected (title: "${title}")`;
+          return null;
+        }).catch(() => null)
+      );
+
+      if (botChallenge) {
+        return {
+          title: pageTitle || resolvedUrl || "",
+          url: resolvedUrl,
+          text: "",
+          error: botChallenge
+        };
+      }
 
       const extracted = extractTextFromHtml({
         html,
@@ -1108,7 +1617,7 @@ export async function browserCaptureScreenshot({
       : undefined;
 
   return manager.withPageSlot(async () => {
-    const page = await manager.newPage();
+    const page = await manager.newPage({ backend: "cloakbrowser" });
 
     try {
       await page.goto(url, {
@@ -1116,18 +1625,7 @@ export async function browserCaptureScreenshot({
         timeout: manager.config.browserOpTimeoutMs
       });
 
-      await page
-        .waitForFunction(
-          () => {
-            const container =
-              document.querySelector("main, article, [role='main'], .content, #content") || document.body;
-            if (!container) return false;
-            const text = container.innerText || "";
-            return text.replace(/\s+/g, " ").trim().length > 200;
-          },
-          { timeout: Math.min(10000, manager.config.browserOpTimeoutMs) }
-        )
-        .catch(() => null);
+      await waitForContent(page, { maxWait: 5000 }).catch(() => {});
 
       const dimensions = await page.evaluate(() => {
         const docEl = document.documentElement;

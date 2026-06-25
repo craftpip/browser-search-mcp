@@ -12,7 +12,7 @@ import {
   isInitializeRequest
 } from "@modelcontextprotocol/sdk/types.js";
 import { getBrowserManager } from "./browser.js";
-import { browserOpenAndExtract, browserSearch, browserCaptureScreenshot } from "./search.js";
+import { browserOpenAndExtract, browserSearch, browserCaptureScreenshot, getSearchBackendHealth } from "./search.js";
 
 const linkMemoryByRef = new Map();
 const linkMemoryByUrl = new Map();
@@ -91,6 +91,15 @@ function parseEngineList(value) {
   return value.map((item) => String(item).trim().toLowerCase()).filter(Boolean);
 }
 
+function normalizeSearchEngineSelection(engines, engine) {
+  const fromList = parseEngineList(engines);
+  const fromSingle = typeof engine === "string" ? String(engine).trim().toLowerCase() : "";
+  const requested = [...fromList, ...(fromSingle ? [fromSingle] : [])].filter(Boolean);
+  if (!requested.length) return [];
+  if (requested.includes("select_best")) return [];
+  return fromList.length ? fromList : [fromSingle];
+}
+
 function parseQueryList(value) {
   if (!Array.isArray(value)) return [];
   return value.map((item) => String(item).trim()).filter(Boolean);
@@ -134,77 +143,115 @@ function sendMarkdown(res, status, payload) {
   res.end(payload);
 }
 
-function formatLogValue(value, maxChars) {
-  if (value === undefined || value === null) return "";
-  if (typeof value === "string") return value;
-  if (typeof value === "number" || typeof value === "boolean") return String(value);
-  try {
-    return JSON.stringify(value);
-  } catch {
-    return String(value);
-  }
-}
-
-function formatLogPayload(payload, maxChars = 4000) {
-  if (payload === undefined || payload === null) return { inline: "", lines: [] };
-  if (typeof payload === "string") return { inline: payload, lines: [] };
-  if (typeof payload !== "object") return { inline: String(payload), lines: [] };
-
-  const entries = Object.entries(payload).filter(([, value]) => value !== undefined);
-  if (!entries.length) return { inline: "", lines: [] };
-
-  const lines = entries.map(([key, value]) => {
-    let rendered = formatLogValue(value, maxChars);
-    if (rendered.length > maxChars) {
-      rendered = `${rendered.slice(0, maxChars)}...<truncated>`;
-    }
-    return `  ${key}: ${rendered}`;
-  });
-
-  if (entries.length <= 3) {
-    const inline = entries
-      .map(([key, value]) => {
-        let rendered = formatLogValue(value, maxChars);
-        if (rendered.length > maxChars) {
-          rendered = `${rendered.slice(0, maxChars)}...<truncated>`;
-        }
-        return `${key}=${rendered}`;
-      })
-      .join(" ");
-    return { inline, lines: [] };
-  }
-
-  return { inline: "", lines };
-}
+const LOG_MAP = {
+  booting:               ["🚀", "Server starting"],
+  "boot.config":         ["⚙️",  (p) => `Search route warmup engines: ${p?.searchRouteWarmupEngines?.join(", ") || "?"}`],
+  "boot.ready":          ["🚀",  (p) => p?.transport === "stdio" ? "Ready (stdio)" : `Ready  ${(p?.host || "?").replace(/^https?:\/\//, "")}:${p?.port || "?"}`],
+  "prelaunch.ready":     ["✅",  "Browser warmed"],
+  "prelaunch.error":     ["❌",  "Browser warmup failed"],
+  "boot.start":          ["", ""],
+  shutdown:              ["🛑",  "Shutting down"],
+  "shutdown.error":      ["❌",  "Shutdown error"],
+  "process.uncaught_exception":  ["💥", "Uncaught exception"],
+  "process.unhandled_rejection": ["⚠️", "Unhandled rejection"]
+};
 
 function logEvent(label, payload) {
-  const { inline, lines } = formatLogPayload(payload);
-  const timestamp = new Date().toISOString();
-  if (lines.length) {
-    console.error(`[${timestamp}] ${label}`);
-    for (const line of lines) {
-      console.error(line);
-    }
-    return;
-  }
-  const suffix = inline ? ` ${inline}` : "";
-  console.error(`[${timestamp}] ${label}${suffix}`);
+  const entry = LOG_MAP[label];
+  if (!entry) return;
+  const [emoji, msg] = entry;
+  const text = typeof msg === "function" ? msg(payload) : msg;
+  if (!text && !emoji) return;
+  if (!text) { console.error(`${emoji}  ${label}`); return; }
+  console.error(`${emoji}  ${text}`);
 }
 
-function summarizeJsonBody(body) {
-  if (!body || typeof body !== "object") {
-    return { bodyType: typeof body, keys: [], hasParams: false };
-  }
+function truncateStr(s, max = 80) {
+  if (!s || s.length <= max) return s || "";
+  return s.slice(0, max) + "...";
+}
 
-  const keys = Object.keys(body);
-  const params = body.params && typeof body.params === "object" ? body.params : null;
-  return {
-    bodyType: "object",
-    keys,
-    hasParams: Boolean(params),
-    paramsKeys: params ? Object.keys(params) : [],
-    hasArguments: Boolean(params && params.arguments && typeof params.arguments === "object")
-  };
+function getDomain(u) {
+  try { return new URL(u).hostname; } catch { return ""; }
+}
+
+function mcpRequestSummary(body) {
+  if (!body) return "?";
+  const m = body?.method || "";
+  if (m !== "tools/call") return m;
+  const name = body?.params?.name || "?";
+  const args = body?.params?.arguments || {};
+  const isPage = name === "web_open_page" || name === "web_page_screenshot";
+  const parts = [name];
+  if (args.query) parts.push(`"${truncateStr(args.query, 60)}"`);
+  if (args.queries) parts.push(truncateStr(args.queries.join(" | "), 60));
+  if (args.url) {
+    const domain = getDomain(args.url);
+    parts.push(isPage && domain ? domain : truncateStr(args.url, 60));
+  }
+  if (args.urls) {
+    const domain = getDomain(args.urls[0]);
+    parts.push(`${args.urls.length} urls${domain ? ` · ${domain}` : ""}`);
+  }
+  if (args.ref_id !== void 0) parts.push(`ref #${args.ref_id}`);
+  if (args.ref_ids) parts.push(`${args.ref_ids.length} refs`);
+  const eng = normalizeSearchEngineSelection(args.engines, args.engine).join(",");
+  if (eng) parts.push(`[${eng}]`);
+  if (args.limit && args.limit !== 5) parts.push(`limit=${args.limit}`);
+  if (args.maxChars && args.maxChars !== 8000) parts.push(`maxc=${args.maxChars}`);
+  if (args.format) parts.push(args.format);
+  if (args.fullPage === false) parts.push("no-fullpage");
+  return parts.join("  ");
+}
+
+function firstResultTitle(text) {
+  const lines = text.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i].startsWith("- [ref_id")) {
+      const match = lines[i].match(/\*\*(.+?)\*\*/);
+      if (match) return truncateStr(match[1], 60);
+    }
+  }
+  return "";
+}
+
+function extractDomains(text) {
+  const domains = [];
+  const lines = text.split("\n");
+  for (const line of lines) {
+    const m = line.match(/URL:\s*(https?:\/\/([^\/\s]+))/);
+    if (m && !domains.includes(m[2])) domains.push(m[2]);
+  }
+  if (!domains.length) {
+    const m = text.match(/\[ref_id \d+\].*?\]\s+(https?:\/\/([^\/\s]+))/);
+    if (m && !domains.includes(m[2])) domains.push(m[2]);
+  }
+  return domains.join(", ");
+}
+
+function mcpResponseSummary(resp) {
+  if (!resp) return "";
+  if (resp.error) return `error: ${truncateStr(resp.error.message || "", 80)}`;
+  const result = resp.result;
+  if (!result) return "";
+  if (result.isError) return "error";
+  const text = result?.content?.[0]?.text || "";
+  if (!text) return "ok";
+  const refs = text.match(/\[ref_id \d+\]/g);
+  if (refs) {
+    const hint = firstResultTitle(text);
+    const domains = extractDomains(text);
+    const domainsPart = domains ? ` · ${domains}` : "";
+    return `${refs.length} results${hint ? ` · “${hint}”` : ""}${domainsPart}`;
+  }
+  const okCount = (text.match(/Status: Success/g) || []).length;
+  const failCount = (text.match(/Status: Failed/g) || []).length;
+  if (okCount || failCount) {
+    const domains = extractDomains(text);
+    const domainsPart = domains ? ` · ${domains}` : "";
+    return `${okCount + failCount} pages (${okCount} ok, ${failCount} err)${domainsPart}`;
+  }
+  return `${Math.round(text.length / 1000)}k chars`;
 }
 
 function summarizeToolArgs(tool, args = {}) {
@@ -221,11 +268,7 @@ function summarizeToolArgs(tool, args = {}) {
       terms,
       termCount: terms.length,
       limit: parseSearchLimit(args.limit, 5),
-      engines: (() => {
-        const engines = parseEngineList(args.engines);
-        if (!engines.length && typeof args.engine === "string") engines.push(args.engine);
-        return engines;
-      })()
+      engines: normalizeSearchEngineSelection(args.engines, args.engine)
     };
   }
 
@@ -253,57 +296,16 @@ function summarizeToolArgs(tool, args = {}) {
   return base;
 }
 
-function createExecutionTimer(label, context = {}) {
+function createExecutionTimer() {
   const startedAtMs = performance.now();
-  const steps = [];
-
   return {
-    step(name, startMs) {
-      const endMs = performance.now();
-      const from = Number.isFinite(startMs) ? startMs : startedAtMs;
-      const durationMs = Math.max(0, Math.round(endMs - from));
-      steps.push({ name, durationMs });
-      return endMs;
-    },
-    end(extra = {}) {
-      const totalDurationMs = Math.max(0, Math.round(performance.now() - startedAtMs));
-      logEvent(label, {
-        ...context,
-        totalDurationMs,
-        steps,
-        ...extra
-      });
-      return totalDurationMs;
-    }
+    step() { return performance.now(); },
+    end() { return Math.max(0, Math.round(performance.now() - startedAtMs)); }
   };
 }
 
 function logBootConfig(config) {
-  logEvent("boot.config", {
-    mcpApiHost: config.mcpApiHost,
-    mcpApiPort: config.mcpApiPort,
-    enableHttpHealth: config.enableHttpHealth,
-    enableHttpMcp: config.enableHttpMcp,
-    enableStdioMcp: config.enableStdioMcp,
-    enableScreenshotDownloadLink: config.enableScreenshotDownloadLink,
-    enableScreenshotPath: Boolean(config.screenshotPathPrefix),
-    screenshotPathDisplay: config.screenshotPathPrefix || null,
-    chromePath: config.chromePath,
-    chromeUserDataDir: config.chromeUserDataDir,
-    chromeProfileDir: config.chromeProfileDir,
-    headless: config.headless,
-    navWaitUntil: config.navWaitUntil,
-    browserOpTimeoutMs: config.browserOpTimeoutMs,
-    prelaunchBrowser: config.prelaunchBrowser,
-    startupUrl: config.startupUrl,
-    searchEngines: config.searchEngines,
-    searchKeepMinWorkingWindows: config.searchKeepMinWorkingWindows,
-    searchMaxWorkingWindows: config.searchMaxWorkingWindows,
-    openPageMaxParallel: config.openPageMaxParallel,
-    maxConcurrentPageOps: config.maxConcurrentPageOps,
-    enableHangRestart: config.enableHangRestart,
-    hangRestartTimeoutMs: config.hangRestartTimeoutMs
-  });
+  logEvent("boot.config", { searchRouteWarmupEngines: config.searchRouteWarmupEngines });
 }
 
 function truncateLink(value, maxChars = 50) {
@@ -799,7 +801,7 @@ function getToolsListResponse() {
       {
         name: "web_search",
         description:
-          "Search the web for any user request and return ranked results with numeric result ids. Use this for general research, fact lookup, docs, tutorials, comparisons, news, and discovery before opening pages.",
+          "Search the web for any user request and return ranked results with numeric result ids. By default, send `engine: \"select_best\"` or omit engine/engines entirely unless the user explicitly asks about engines or requests a specific one. `select_best` means the server will choose the best engine automatically using its fallback and circuit-breaker logic. If `select_best` is combined with specific engines, `select_best` takes priority. Use this for general research, fact lookup, docs, tutorials, comparisons, news, and discovery before opening pages.",
         inputSchema: {
           type: "object",
           properties: {
@@ -814,14 +816,15 @@ function getToolsListResponse() {
               type: "array",
               items: {
                 type: "string",
-                enum: ["bing", "duckduckgo", "google"]
+                enum: ["select_best", "duckduckgo_api", "bing_lp", "mojeek_lp", "google_ch", "duckduckgo_ch"]
               },
-              description: "Search engines to run in parallel"
+              description: "Specific search engines to run. Prefer `select_best` by default. Only send concrete engines if the user explicitly requests certain engines or asks about engine behavior. If `select_best` appears anywhere in this list, it takes priority and automatic fallback/circuit-breaker selection is used."
             },
             engine: {
               type: "string",
-              enum: ["bing", "duckduckgo", "google"],
-              default: "bing"
+              default: "select_best",
+              enum: ["select_best", "duckduckgo_api", "bing_lp", "mojeek_lp", "google_ch", "duckduckgo_ch"],
+              description: "Preferred default: `select_best`. Only send a concrete engine if the user explicitly requests one engine or asks about engine behavior. `select_best` uses automatic fallback and circuit-breaker logic."
             }
           },
           description: "Provide query (string) or queries (string[]). Use queries for multiple search variations.",
@@ -924,13 +927,7 @@ async function handleToolCall(name, args = {}) {
       assertString(args.query, "query");
     }
     const limit = parseSearchLimit(args.limit, 5);
-    const engines = parseEngineList(args.engines);
-    if (!engines.length && typeof args.engine === "string") {
-      engines.push(args.engine);
-    }
-    if (!engines.length) {
-      engines.push(...manager.config.searchEngines);
-    }
+    const engines = normalizeSearchEngineSelection(args.engines, args.engine);
     mark = timer.step("validate_inputs", mark);
 
     const results = await runWithHangGuard(`mcp:${name}`, () =>
@@ -938,7 +935,7 @@ async function handleToolCall(name, args = {}) {
         query: args.query,
         queries,
         limit,
-        engines
+        ...(engines.length ? { engines } : {})
       })
     );
     mark = timer.step("browser_search", mark);
@@ -972,7 +969,7 @@ async function handleToolCall(name, args = {}) {
     }
     mark = timer.step("resolve_targets", mark);
     const maxChars = parseMaxChars(args.maxChars, 8000);
-    const includeSeoAnalysis = args.includeSeoAnalysis === true;
+    const includeSeoAnalysis = args.includeSeoAnalysis !== false;
     const manager = await getBrowserManager();
     mark = timer.step("prepare_execution", mark);
     const result = await runWithHangGuard(`mcp:${name}`, () =>
@@ -1094,29 +1091,34 @@ function createMcpServer() {
 
   server.setRequestHandler(ListToolsRequestSchema, async () => {
     const response = getToolsListResponse();
-    logEvent("mcp.request", { method: "tools/list", params: {} });
+    logEvent("mcp.request", { method: "tools/list" });
     logEvent("mcp.response", { method: "tools/list", result: response });
     return response;
   });
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args = {} } = request.params;
-    logEvent("mcp.request", {
-      method: "tools/call",
-      tool: name,
-      summary: summarizeToolArgs(name, args)
-    });
+    const summary = summarizeToolArgs(name, args);
+    const sumTerms = summary.terms?.length ? summary.terms.join(" | ") : "";
+    const sumTargets = summary.urlCount || summary.refCount
+      ? `${summary.urlCount || 0} urls, ${summary.refCount || 0} refs` : "";
+
+    console.error(`📡  ${name}${sumTerms ? " · " + truncateStr(sumTerms, 60) : ""}${sumTargets ? " · " + sumTargets : ""}`);
 
     try {
+      const t0 = Date.now();
       const response = await handleToolCall(name, args);
-      logEvent("mcp.response", { method: "tools/call", tool: name, result: response });
+      const ms = Date.now() - t0;
+      const ok = response?.content?.[0]?.text || "";
+      const okLabel = ok.length ? `${Math.round(ok.length / 1000)}k chars` : "";
+      console.error(`📨  ${ms}ms${okLabel ? " · " + okLabel : ""}`);
       return response;
     } catch (error) {
+      console.error(`❌  ${truncateStr(String(error?.message || error), 120)}`);
       const errorResponse = {
         isError: true,
         ...asMarkdownContent(`Error calling ${name}: ${String(error?.message || error)}`)
       };
-      logEvent("mcp.response", { method: "tools/call", tool: name, result: errorResponse });
       return errorResponse;
     }
   });
@@ -1159,12 +1161,7 @@ async function maybeStartHttpServer(managerOverride) {
 
         if (method === "POST") {
           const body = await readJsonBody(req);
-          logEvent("http.mcp.request", {
-            method,
-            path: url.pathname,
-            sessionId: sessionId || null,
-            summary: summarizeJsonBody(body)
-          });
+          const reqSum = mcpRequestSummary(body);
 
           {
             const existingTransport = resolveTransport();
@@ -1177,19 +1174,27 @@ async function maybeStartHttpServer(managerOverride) {
             }
           }
 
+          const t0 = Date.now();
+          const isToolCall = body?.method === "tools/call";
+          if (reqSum && isToolCall) {
+            console.error(`📡  ${reqSum}`);
+          }
+
           const response = await handleStatelessMcpPost(body);
+          const ms = Date.now() - t0;
+
           if (response === null) {
-            logEvent("http.mcp.notification", {
-              method,
-              path: url.pathname,
-              stateless: true,
-              summary: summarizeJsonBody(body)
-            });
             res.writeHead(204);
             res.end();
             return;
           }
-          logEvent("http.mcp.response", { method, path: url.pathname, stateless: true, result: response });
+
+          const resSum = mcpResponseSummary(response);
+          if (body?.method === "initialize") {
+            console.error(`🤝  MCP initialized`);
+          } else if (isToolCall && reqSum) {
+            console.error(`📨  ${ms}ms${resSum ? " · " + resSum : ""}`);
+          }
           sendJson(res, 200, response);
           return;
 
@@ -1267,7 +1272,10 @@ async function maybeStartHttpServer(managerOverride) {
       }
 
       if (url.pathname === "/" || url.pathname === "/health") {
-        const health = await manager.getHealth();
+        const health = {
+          ...(await manager.getHealth()),
+          searchRouteCircuitBreakers: getSearchBackendHealth()
+        };
         logEvent("http.request", { method, path: url.pathname });
         logEvent("http.response", { method, path: url.pathname, result: health });
         sendJson(res, 200, health);
@@ -1304,25 +1312,19 @@ async function maybeStartHttpServer(managerOverride) {
 
         const limit = parseSearchLimit(url.searchParams.get("limit"), 5);
         const enginesParam = url.searchParams.get("engines");
-        const engines = enginesParam
-          ? enginesParam
-              .split(",")
-              .map((item) => item.trim().toLowerCase())
-              .filter(Boolean)
-          : [];
-        const engineParam = String(url.searchParams.get("engine") || "")
-          .trim()
-          .toLowerCase();
-        if (!engines.length && engineParam) {
-          engines.push(engineParam);
-        }
-        if (!engines.length) {
-          engines.push(...manager.config.searchEngines);
-        }
+        const engines = normalizeSearchEngineSelection(
+          enginesParam
+            ? enginesParam
+                .split(",")
+                .map((item) => item.trim().toLowerCase())
+                .filter(Boolean)
+            : [],
+          url.searchParams.get("engine")
+        );
         mark = timer.step("parse_inputs", mark);
 
         const payload = decorateSearchPayload(
-          await runWithHangGuard("http:/search", () => browserSearch({ query, queries, limit, engines }))
+          await runWithHangGuard("http:/search", () => browserSearch({ query, queries, limit, ...(engines.length ? { engines } : {}) }))
         );
         mark = timer.step("browser_search", mark);
         const markdown = formatSearchMarkdown(payload);
@@ -1566,9 +1568,9 @@ process.on("unhandledRejection", async (reason) => {
 
 manager.prelaunchIfConfigured().then(
   () => {
-    logEvent("prelaunch.ready", {
-      enabled: manager.config.prelaunchBrowser
-    });
+    if (manager.config.prelaunchBrowser) {
+      logEvent("prelaunch.ready", { enabled: true });
+    }
   },
   (error) => {
     logEvent("prelaunch.error", {

@@ -30,7 +30,7 @@ async function testStdioMcp(label, command, args = [], env = {}) {
 
     const search = await client.callTool({
       name: "web_search",
-      arguments: { query: "mcp protocol", limit: 3, engine: "bing" }
+      arguments: { query: "mcp protocol", limit: 3, engine: "bing_lp" }
     });
 
     const searchText = search?.content?.[0]?.text || "";

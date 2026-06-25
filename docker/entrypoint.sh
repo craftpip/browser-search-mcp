@@ -31,4 +31,9 @@ if [ "${ENABLE_VNC:-0}" = "1" ]; then
   websockify --web=/usr/share/novnc/ "${NOVNC_PORT:-7900}" "localhost:${VNC_PORT:-5900}" >/tmp/novnc.log 2>&1 &
 fi
 
+# Ensure node_modules matches package.json (handles branch switches, stale volumes)
+if [ -f "package.json" ]; then
+  npm install --silent --omit=dev --no-audit --no-fund 2>/dev/null
+fi
+
 exec "$@"

@@ -2,11 +2,40 @@
   "name": "browser-search-mcp",
   "version": "1.0.0",
   "description": "MCP server for real Chromium browser search and extraction",
+  "license": "Apache-2.0",
   "type": "module",
   "main": "src/mcp-server.js",
+  "files": [
+    "src",
+    "docker",
+    "scripts",
+    "Dockerfile",
+    "docker-compose.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/craftpip/browser-search-mcp.git"
+  },
+  "homepage": "https://github.com/craftpip/browser-search-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/craftpip/browser-search-mcp/issues"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "browser",
+    "search",
+    "chromium",
+    "puppeteer",
+    "http-server"
+  ],
   "scripts": {
     "start": "node src/mcp-server.js",
     "bench": "node scripts/benchmark.mjs",
+    "bench:search": "node benchmarking/search-benchmark.mjs",
+    "bench:all": "node scripts/benchmark.mjs && node benchmarking/search-benchmark.mjs",
     "test:mcporter": "bash scripts/test-mcporter.sh",
     "docs": "typedoc src/ --out doc"
   },
@@ -19,6 +48,7 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.17.4",
     "@mozilla/readability": "^0.6.0",
+    "cloakbrowser": "^0.3.31",
     "jsdom": "^27.0.0",
     "puppeteer-core": "^24.21.0"
   }

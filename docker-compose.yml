@@ -32,15 +32,18 @@ services:
       NAV_WAIT_UNTIL: ${NAV_WAIT_UNTIL:-domcontentloaded}
       PRELAUNCH_BROWSER: ${PRELAUNCH_BROWSER:-1}
       STARTUP_URL: ${STARTUP_URL:-about:blank}
-      SEARCH_ENGINES: ${SEARCH_ENGINES:-bing,duckduckgo,google}
+      SEARCH_ROUTE_WARMUP_ENGINES: ${SEARCH_ROUTE_WARMUP_ENGINES:-duckduckgo_api,google_cb,google_lp,bing_lp,duckduckgo_cb,bing_cb}
+      SEARCH_ROUTE_CIRCUIT_OPEN_MS: ${SEARCH_ROUTE_CIRCUIT_OPEN_MS:-300000}
+      SEARCH_FALLBACK: ${SEARCH_FALLBACK:-}
       SEARCH_KEEP_MIN_WORKING_WINDOWS: ${SEARCH_KEEP_MIN_WORKING_WINDOWS:-2}
       SEARCH_MAX_WORKING_WINDOWS: ${SEARCH_MAX_WORKING_WINDOWS:-4}
       OPEN_PAGE_MAX_PARALLEL: ${OPEN_PAGE_MAX_PARALLEL:-4}
       MAX_CONCURRENT_PAGE_OPS: ${MAX_CONCURRENT_PAGE_OPS:-30}
       HUMAN_TYPING_DELAY: ${HUMAN_TYPING_DELAY:-0}
+      LIGHTPANDA_PORT: ${LIGHTPANDA_PORT:-9222}
+      BROWSER_BACKEND: ${BROWSER_BACKEND:-cloakbrowser}
     volumes:
       - .:/app
-      - /app/node_modules
       - /tmp/screenshots:/app/screenshots
       - chrome_profile_data:/data/chrome
     ports:

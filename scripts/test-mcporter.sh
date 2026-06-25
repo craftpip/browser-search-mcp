@@ -50,12 +50,12 @@ node -e '
 ' "$LIST_JSON"
 
 echo "[mcporter-test] calling web_search"
-CALL_JSON="$(npx mcporter call "$SERVER_NAME.web_search" query='mcp protocol' limit=1 engine=duckduckgo --config "$CONFIG_PATH" --output json)"
+CALL_JSON="$(npx mcporter call "$SERVER_NAME.web_search" query='mcp protocol' limit=1 engine=duckduckgo_api --config "$CONFIG_PATH" --output json)"
 node -e '
   const payload = JSON.parse(process.argv[1]);
   const content = payload.content || [];
   const text = content[0]?.text || "";
-  if (!text.includes("result id")) {
+  if (!text.includes("ref_id")) {
     throw new Error(`unexpected web_search payload: ${process.argv[1]}`);
   }
   const titleMatch = text.match(/\*\*([^*]+)\*\*/);
