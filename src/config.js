@@ -232,7 +232,7 @@ export async function loadConfig() {
     enableHangRestart: parseBoolean(process.env.ENABLE_HANG_RESTART, false),
     hangRestartTimeoutMs: parseNumber(process.env.HANG_RESTART_TIMEOUT_MS, 120000),
     startupUrl: process.env.STARTUP_URL || "about:blank",
-    searchEngines: parseEngines(process.env.SEARCH_ENGINES, ["duckduckgo_api", "google_cb", "google_lp", "bing_lp", "duckduckgo_cb", "bing_cb"]),
+    searchRouteWarmupEngines: parseEngines(process.env.SEARCH_ROUTE_WARMUP_ENGINES, ["duckduckgo_api", "google_cb", "google_lp", "bing_lp", "duckduckgo_cb", "bing_cb"]),
     searchFallback: process.env.SEARCH_FALLBACK
       ? parseEngines(process.env.SEARCH_FALLBACK, [])
       : null

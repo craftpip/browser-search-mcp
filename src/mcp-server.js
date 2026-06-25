@@ -91,6 +91,15 @@ function parseEngineList(value) {
   return value.map((item) => String(item).trim().toLowerCase()).filter(Boolean);
 }
 
+function normalizeSearchEngineSelection(engines, engine) {
+  const fromList = parseEngineList(engines);
+  const fromSingle = typeof engine === "string" ? String(engine).trim().toLowerCase() : "";
+  const requested = [...fromList, ...(fromSingle ? [fromSingle] : [])].filter(Boolean);
+  if (!requested.length) return [];
+  if (requested.includes("select_best")) return [];
+  return fromList.length ? fromList : [fromSingle];
+}
+
 function parseQueryList(value) {
   if (!Array.isArray(value)) return [];
   return value.map((item) => String(item).trim()).filter(Boolean);
@@ -136,7 +145,7 @@ function sendMarkdown(res, status, payload) {
 
 const LOG_MAP = {
   booting:               ["🚀", "Server starting"],
-  "boot.config":         ["⚙️",  (p) => `Engines: ${p?.searchEngines?.join(", ") || "?"}`],
+  "boot.config":         ["⚙️",  (p) => `Search route warmup engines: ${p?.searchRouteWarmupEngines?.join(", ") || "?"}`],
   "boot.ready":          ["🚀",  (p) => p?.transport === "stdio" ? "Ready (stdio)" : `Ready  ${(p?.host || "?").replace(/^https?:\/\//, "")}:${p?.port || "?"}`],
   "prelaunch.ready":     ["✅",  "Browser warmed"],
   "prelaunch.error":     ["❌",  "Browser warmup failed"],
@@ -186,7 +195,7 @@ function mcpRequestSummary(body) {
   }
   if (args.ref_id !== void 0) parts.push(`ref #${args.ref_id}`);
   if (args.ref_ids) parts.push(`${args.ref_ids.length} refs`);
-  const eng = args.engine || (Array.isArray(args.engines) ? args.engines.join(",") : "");
+  const eng = normalizeSearchEngineSelection(args.engines, args.engine).join(",");
   if (eng) parts.push(`[${eng}]`);
   if (args.limit && args.limit !== 5) parts.push(`limit=${args.limit}`);
   if (args.maxChars && args.maxChars !== 8000) parts.push(`maxc=${args.maxChars}`);
@@ -259,11 +268,7 @@ function summarizeToolArgs(tool, args = {}) {
       terms,
       termCount: terms.length,
       limit: parseSearchLimit(args.limit, 5),
-      engines: (() => {
-        const engines = parseEngineList(args.engines);
-        if (!engines.length && typeof args.engine === "string") engines.push(args.engine);
-        return engines;
-      })()
+      engines: normalizeSearchEngineSelection(args.engines, args.engine)
     };
   }
 
@@ -300,7 +305,7 @@ function createExecutionTimer() {
 }
 
 function logBootConfig(config) {
-  logEvent("boot.config", { searchEngines: config.searchEngines });
+  logEvent("boot.config", { searchRouteWarmupEngines: config.searchRouteWarmupEngines });
 }
 
 function truncateLink(value, maxChars = 50) {
@@ -796,7 +801,7 @@ function getToolsListResponse() {
       {
         name: "web_search",
         description:
-          "Search the web for any user request and return ranked results with numeric result ids. Engine selection is smart by default: do not specify engine/engines unless you specifically need a particular search engine. Use this for general research, fact lookup, docs, tutorials, comparisons, news, and discovery before opening pages.",
+          "Search the web for any user request and return ranked results with numeric result ids. By default, send `engine: \"select_best\"` or omit engine/engines entirely unless the user explicitly asks about engines or requests a specific one. `select_best` means the server will choose the best engine automatically using its fallback and circuit-breaker logic. If `select_best` is combined with specific engines, `select_best` takes priority. Use this for general research, fact lookup, docs, tutorials, comparisons, news, and discovery before opening pages.",
         inputSchema: {
           type: "object",
           properties: {
@@ -811,14 +816,15 @@ function getToolsListResponse() {
               type: "array",
               items: {
                 type: "string",
-                enum: ["duckduckgo_api", "bing_lp", "mojeek_lp", "google_ch", "duckduckgo_ch"]
+                enum: ["select_best", "duckduckgo_api", "bing_lp", "mojeek_lp", "google_ch", "duckduckgo_ch"]
               },
-              description: "Specific search engines to run. Omit this unless you specifically require particular engines; by default, search uses the smart fallback chain."
+              description: "Specific search engines to run. Prefer `select_best` by default. Only send concrete engines if the user explicitly requests certain engines or asks about engine behavior. If `select_best` appears anywhere in this list, it takes priority and automatic fallback/circuit-breaker selection is used."
             },
             engine: {
               type: "string",
-              enum: ["duckduckgo_api", "bing_lp", "mojeek_lp", "google_ch", "duckduckgo_ch"],
-              description: "Specific search engine to run. Omit this unless you specifically require one engine; by default, search uses the smart fallback chain."
+              default: "select_best",
+              enum: ["select_best", "duckduckgo_api", "bing_lp", "mojeek_lp", "google_ch", "duckduckgo_ch"],
+              description: "Preferred default: `select_best`. Only send a concrete engine if the user explicitly requests one engine or asks about engine behavior. `select_best` uses automatic fallback and circuit-breaker logic."
             }
           },
           description: "Provide query (string) or queries (string[]). Use queries for multiple search variations.",
@@ -921,10 +927,7 @@ async function handleToolCall(name, args = {}) {
       assertString(args.query, "query");
     }
     const limit = parseSearchLimit(args.limit, 5);
-    const engines = parseEngineList(args.engines);
-    if (!engines.length && typeof args.engine === "string") {
-      engines.push(args.engine);
-    }
+    const engines = normalizeSearchEngineSelection(args.engines, args.engine);
     mark = timer.step("validate_inputs", mark);
 
     const results = await runWithHangGuard(`mcp:${name}`, () =>
@@ -1189,12 +1192,8 @@ async function maybeStartHttpServer(managerOverride) {
           const resSum = mcpResponseSummary(response);
           if (body?.method === "initialize") {
             console.error(`🤝  MCP initialized`);
-          } else if (reqSum) {
-            if (isToolCall) {
-              console.error(`📨  ${ms}ms${resSum ? " · " + resSum : ""}`);
-            } else {
-              console.error(`📡  ${reqSum} · ${ms}ms${resSum ? " · " + resSum : ""}`);
-            }
+          } else if (isToolCall && reqSum) {
+            console.error(`📨  ${ms}ms${resSum ? " · " + resSum : ""}`);
           }
           sendJson(res, 200, response);
           return;
@@ -1313,18 +1312,15 @@ async function maybeStartHttpServer(managerOverride) {
 
         const limit = parseSearchLimit(url.searchParams.get("limit"), 5);
         const enginesParam = url.searchParams.get("engines");
-        const engines = enginesParam
-          ? enginesParam
-              .split(",")
-              .map((item) => item.trim().toLowerCase())
-              .filter(Boolean)
-          : [];
-        const engineParam = String(url.searchParams.get("engine") || "")
-          .trim()
-          .toLowerCase();
-        if (!engines.length && engineParam) {
-          engines.push(engineParam);
-        }
+        const engines = normalizeSearchEngineSelection(
+          enginesParam
+            ? enginesParam
+                .split(",")
+                .map((item) => item.trim().toLowerCase())
+                .filter(Boolean)
+            : [],
+          url.searchParams.get("engine")
+        );
         mark = timer.step("parse_inputs", mark);
 
         const payload = decorateSearchPayload(

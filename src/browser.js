@@ -44,7 +44,8 @@ const BROWSER_LOG_EMOJI = {
   "search.window.opened": "🪟",
   "search.window.closed": "🔒",
   "search.warmup.ready": "✅",
-  "chromium.prelaunch.ready": "✅"
+  "chromium.prelaunch.ready": "✅",
+  "chromium.ready": "✅"
 };
 
 const BROWSER_LOG_LABEL = {
@@ -55,14 +56,16 @@ const BROWSER_LOG_LABEL = {
   "search.window.opened": "Window Opened",
   "search.window.closed": "Window Closed",
   "search.warmup.ready": "Search Windows Warmed",
-  "chromium.prelaunch.ready": "Chromium Ready"
+  "chromium.prelaunch.ready": "Chromium Ready",
+  "chromium.ready": "Chromium Ready"
 };
 
 const BROWSER_LOG_FMT = {
   "search.window.opened":  (p) => `${p?.engine || "?"}  (${p?.reason || "?"})`,
   "search.window.closed":  (p) => `${p?.engine || "?"}  (${p?.reason || "?"})`,
   "search.warmup.ready":  (p) => `${p?.engines?.length || 0} engines`,
-  "chromium.prelaunch.ready": () => ""
+  "chromium.prelaunch.ready": () => "",
+  "chromium.ready": () => ""
 };
 
 function logBrowserEvent(label, payload) {
@@ -358,6 +361,7 @@ export class BrowserManager {
       }
     });
 
+    logBrowserEvent("chromium.ready", { reason: "on_demand" });
     return browser;
   }
 
@@ -387,6 +391,7 @@ export class BrowserManager {
     if (this.browser && this.browser.connected) return this.browser;
     if (this.launching) return this.launching;
 
+    console.error("⏳  Starting Chromium...");
     this.launching = this.launchWithRecovery();
 
     try {
@@ -771,7 +776,7 @@ export class BrowserManager {
     return this.config.searchMaxWorkingWindows;
   }
 
-  async ensureMinWorkingWindows(engine, { startupUrl, waitUntil = "domcontentloaded" } = {}) {
+  async ensureMinWorkingWindows(engine, { startupUrl, waitUntil = "domcontentloaded", label, reason = "cold_start" } = {}) {
     const lower = (engine || "").toLowerCase();
     const needsCloakbrowser = ["duckduckgo_cb", "google_cb", "bing_cb"].includes(lower);
     const needsChromium = ["duckduckgo_ch", "google_ch"].includes(lower);
@@ -811,7 +816,7 @@ export class BrowserManager {
             timeout: this.config.browserOpTimeoutMs
           });
         }
-        this.logWindowEvent("search.window.opened", entry.engine, { reason: "warmup", persistent: true });
+        this.logWindowEvent("search.window.opened", label || entry.engine, { reason, persistent: true });
       } catch (error) {
         pool.windows = pool.windows.filter((item) => item !== entry);
         throw error;
@@ -827,7 +832,7 @@ export class BrowserManager {
     }
 
     const poolEngine = this._poolEngine(engine);
-    await this.ensureMinWorkingWindows(poolEngine, { startupUrl, waitUntil });
+    await this.ensureMinWorkingWindows(poolEngine, { startupUrl, waitUntil, label: engine, reason: "cold_start" });
     const pool = this.getEnginePool(poolEngine);
 
     while (true) {
@@ -863,7 +868,7 @@ export class BrowserManager {
               timeout: this.config.browserOpTimeoutMs
             });
           }
-          this.logWindowEvent("search.window.opened", entry.engine, { reason: "on_demand", persistent: false });
+          this.logWindowEvent("search.window.opened", engine, { reason: "on_demand", persistent: false });
           return page;
         } catch (error) {
           pool.windows = pool.windows.filter((item) => item !== entry);
@@ -934,7 +939,7 @@ export class BrowserManager {
       headless: this.config.headless,
       userDataDir: this.config.chromeUserDataDir,
       profileDir: this.config.chromeProfileDir,
-      searchEngines: this.config.searchEngines,
+      searchRouteWarmupEngines: this.config.searchRouteWarmupEngines,
       searchWindows: {
         total: totalSearchWindows,
         byEngine: pools
@@ -975,16 +980,17 @@ export class BrowserManager {
       }
 
       await Promise.allSettled(
-        this.config.searchEngines.map((engine) =>
+        this.config.searchRouteWarmupEngines.map((engine) =>
           this.ensureMinWorkingWindows(engine, {
             startupUrl: ENGINE_STARTUP_URLS[engine] || "about:blank",
-            waitUntil: "domcontentloaded"
+            waitUntil: "domcontentloaded",
+            reason: "warmup"
           })
         )
       );
 
       logBrowserEvent("search.warmup.ready", {
-        engines: this.config.searchEngines,
+        engines: this.config.searchRouteWarmupEngines,
         minWindowsPerEngine: this.config.searchKeepMinWorkingWindows,
         maxWindowsPerEngine: this.config.searchMaxWorkingWindows,
         stats: this.buildWindowStats()

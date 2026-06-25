@@ -1,8 +1,8 @@
 # Code of Conduct
 
-## Our Pledge
+## Pledge
 
-We want this project to be a welcoming, respectful place for everyone.
+I want this project to be a welcoming, respectful place for everyone.
 
 Participants are expected to act professionally and constructively in issues, pull requests, and other project spaces.
 
@@ -22,7 +22,7 @@ Participants are expected to act professionally and constructively in issues, pu
 
 ## Enforcement
 
-Project maintainers may remove comments, close discussions, or block participation when behavior harms the project or its contributors.
+The maintainer may remove comments, close discussions, or block participation when behavior harms the project or its contributors.
 
 ## Reporting
 

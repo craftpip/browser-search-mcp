@@ -298,7 +298,7 @@ The most important environment variables are:
 - `CHROME_PROFILE_DIR`: Chrome profile subdirectory, default `Default`
 - `PRELAUNCH_BROWSER`: prelaunch browser at startup
 - `BROWSER_OP_TIMEOUT_MS`: browser operation timeout in milliseconds
-- `SEARCH_ENGINES`: comma-separated engine list
+- `SEARCH_ROUTE_WARMUP_ENGINES`: comma-separated search-route warmup engine list
 - `ENABLE_VNC`: enable VNC and noVNC in Docker
 
 See `.env.example` for the full list.

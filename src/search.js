@@ -40,9 +40,8 @@ const ENGINE_BACKENDS = {
 };
 const DEFAULT_FALLBACK = [
   "duckduckgo_api",
-  "google_cb", "google_lp",
-  "bing_lp", "duckduckgo_cb", "bing_cb",
-  "google_ch", "duckduckgo_ch", "mojeek_lp"
+  "google_lp", "google_cb", "duckduckgo_cb", "bing_cb",
+  "bing_lp", "google_ch", "duckduckgo_ch", "mojeek_lp"
 ];
 const routeCircuitState = new Map();
 const ENGINE_PAGE_CONFIG = {
@@ -226,6 +225,9 @@ export function getSearchBackendHealth() {
 function normalizeEngines(engines, fallback) {
   const input = Array.isArray(engines) ? engines : [engines].filter(Boolean);
   const requested = input.map((item) => String(item).trim().toLowerCase()).filter(Boolean);
+  if (requested.includes("select_best")) {
+    return fallback;
+  }
   const normalized = input
     .map((item) => String(item).trim().toLowerCase())
     .filter((item) => SUPPORTED_ENGINES.has(item));
@@ -1016,13 +1018,11 @@ async function runDuckDuckGoHttpSearch({ query, engine, config }) {
 
 async function submitSearchFromHomepage({ page, query, engine, config }) {
   const engineConfig = ENGINE_PAGE_CONFIG[engine];
-  const t0 = performance.now();
 
   await page.goto(engineConfig.searchUrl(query), {
     waitUntil: "domcontentloaded",
     timeout: config.browserOpTimeoutMs
   });
-  const t1 = performance.now();
 
   // DuckDuckGo shows homepage skeleton with ?q=, not results — need to submit the form
   if (engine === "duckduckgo_ch" || engine === "duckduckgo_cb") {
@@ -1039,19 +1039,13 @@ async function submitSearchFromHomepage({ page, query, engine, config }) {
     }, query);
     // Wait for navigation to complete after form submit
     await page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: config.browserOpTimeoutMs }).catch(() => {});
-    const tMid = performance.now();
     await waitForAnySelector(page, engineConfig.resultSelectors, config.browserOpTimeoutMs);
-    const t2 = performance.now();
-    console.error(`⏱️  ${engine}: goto=${Math.round(t1 - t0)}ms → submit_form=${Math.round(tMid - t1)}ms → wait_results=${Math.round(t2 - tMid)}ms`);
     return;
   }
 
   await page.waitForSelector("body", { timeout: config.browserOpTimeoutMs }).catch(() => {});
   await new Promise((r) => setTimeout(r, 500));
   await waitForAnySelector(page, engineConfig.resultSelectors, config.browserOpTimeoutMs);
-  const t2 = performance.now();
-
-  console.error(`⏱️  ${engine}: goto=${Math.round(t1 - t0)}ms → wait_results=${Math.round(t2 - t1)}ms`);
 }
 
 async function runSearchEngine({ manager, query, engine, config }) {
@@ -1317,6 +1311,18 @@ async function runFallbackEngineGroups({ manager, query, limit, config }) {
       const value = await runSearchRoute({ manager, query, engine, config, explicit: false });
       const settled = [{ status: "fulfilled", value, engine }];
       const result = buildQueryResult({ query, settled, limit, fallbackAttempted: true });
+
+      if (skipped.length || errors.length) {
+        const parts = [];
+        if (skipped.length) {
+          parts.push(`skipped: ${skipped.map((s) => `${s.engine}(${s.route})`).join(", ")}`);
+        }
+        if (errors.length) {
+          parts.push(`failed: ${errors.map((e) => `${e.engine}(${e.route})`).join(", ")}`);
+        }
+        console.error(`🔁  ${query}: ${parts.join("; ")}`);
+      }
+
       return {
         ...result,
         errors,
@@ -1330,6 +1336,17 @@ async function runFallbackEngineGroups({ manager, query, limit, config }) {
     } catch (reason) {
       errors.push({ engine, route: routeKey(engine), error: String(reason?.message || reason) });
     }
+  }
+
+  const skipParts = [];
+  if (skipped.length) {
+    skipParts.push(`skipped: ${skipped.map((s) => `${s.engine}(${s.route})`).join(", ")}`);
+  }
+  if (errors.length) {
+    skipParts.push(`failed: ${errors.map((e) => `${e.engine}(${e.route})`).join(", ")}`);
+  }
+  if (skipParts.length) {
+    console.error(`🔁  ${query}: ${skipParts.join("; ")}`);
   }
 
   return {
