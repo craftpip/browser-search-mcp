@@ -1499,7 +1499,7 @@ export async function browserOpenAndExtract({ url, maxChars = 8000, includeSeoAn
   const manager = await getBrowserManager();
 
   return manager.withPageSlot(async () => {
-    const page = await manager.newPage({ backend: "cloakbrowser" });
+    const page = await manager.newPage({ backend: manager.config.defaultBackend });
     const operationTimeoutMs = Math.max(1000, Number(manager.config.browserOpTimeoutMs) || 60000);
 
     const withPageTimeout = async (label, task) => {
@@ -1617,7 +1617,7 @@ export async function browserCaptureScreenshot({
       : undefined;
 
   return manager.withPageSlot(async () => {
-    const page = await manager.newPage({ backend: "cloakbrowser" });
+    const page = await manager.newPage({ backend: manager.config.defaultBackend });
 
     try {
       await page.goto(url, {

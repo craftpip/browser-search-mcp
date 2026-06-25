@@ -83,6 +83,7 @@ For visual verification, call `web_page_screenshot` with the same `ref_id`.
 |----------|---------|-------------|
 | `CHROME_PATH` | `/usr/bin/chromium` | Path to Chromium executable |
 | `HEADLESS` | `true` | Run browser in headless mode |
+| `BROWSER_BACKEND` | `cloakbrowser` | Default backend for non-search page creation. Allowed values: `cloakbrowser`, `chromium`, `lightpanda`. This is used by `web_open_page` and `web_page_screenshot`. |
 | `BROWSER_OP_TIMEOUT_MS` | `60000` | Per-operation timeout |
 | `SEARCH_ROUTE_WARMUP_ENGINES` | `duckduckgo_api,google_cb,google_lp,bing_lp,duckduckgo_cb,bing_cb` | Engines to warm up on startup |
 | `SEARCH_ROUTE_CIRCUIT_OPEN_MS` | `300000` | Per-route cooldown after failure |
@@ -94,6 +95,14 @@ For visual verification, call `web_page_screenshot` with the same `ref_id`.
 - Reference memory is process-local and resets when the server restarts.
 - Prefer `ref_id` / `ref_ids` immediately after a search within the same session.
 - Sticky search windows are reused for performance.
+- `BROWSER_BACKEND` is parsed in `src/config.js` into `defaultBackend`.
+- `BrowserManager.newPage()` in `src/browser.js` uses `defaultBackend` only when no specific search engine override is passed.
+- `web_open_page` calls `browserOpenAndExtract()`, and that opens pages with `manager.newPage({ backend: manager.config.defaultBackend })`.
+- `web_page_screenshot` calls `browserCaptureScreenshot()`, and that opens pages with `manager.newPage({ backend: manager.config.defaultBackend })`.
+- Search routes are different: when `newPage()` is called with an engine like `bing_lp`, `google_cb`, or `duckduckgo_ch`, the engine-specific route wins over `BROWSER_BACKEND`.
+- Current engine-to-backend overrides in `newPage()` are: `*_cb` -> `cloakbrowser`, `*_ch` -> `chromium`, `*_lp` -> `lightpanda`.
+- So the rule is simple: `BROWSER_BACKEND` controls direct page operations, but search-engine routes control search pages.
+- Before adding or changing config, trace the existing variable through `loadConfig()`, `BrowserManager.newPage()`, and the actual call site first; do not invent a new env var or behavior until the current flow is verified end-to-end.
 
 ---
 

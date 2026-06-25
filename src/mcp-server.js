@@ -11,6 +11,7 @@ import {
   ListToolsRequestSchema,
   isInitializeRequest
 } from "@modelcontextprotocol/sdk/types.js";
+import { formatBrowserBackendShort, parseBrowserBackend } from "./config.js";
 import { getBrowserManager } from "./browser.js";
 import { browserOpenAndExtract, browserSearch, browserCaptureScreenshot, getSearchBackendHealth } from "./search.js";
 
@@ -196,6 +197,17 @@ function getDomain(u) {
   try { return new URL(u).hostname; } catch { return ""; }
 }
 
+function getRememberedLinkRecord(ref) {
+  const remembered = linkMemoryByRef.get(ref);
+  if (!remembered) return null;
+  if (typeof remembered === "string") {
+    return { url: remembered };
+  }
+  const url = String(remembered?.url || "").trim();
+  if (!url) return null;
+  return { url };
+}
+
 function mcpRequestSummary(body) {
   if (!body) return "?";
   const m = body?.method || "";
@@ -216,7 +228,10 @@ function mcpRequestSummary(body) {
   }
   if (args.ref_id !== void 0) parts.push(`ref #${args.ref_id}`);
   if (args.ref_ids) parts.push(`${args.ref_ids.length} refs`);
-  const eng = normalizeSearchEngineSelection(args.engines, args.engine).join(",");
+  const pageBackend = formatBrowserBackendShort(parseBrowserBackend(process.env.BROWSER_BACKEND, "cloakbrowser"));
+  const eng = isPage
+    ? pageBackend
+    : normalizeSearchEngineSelection(args.engines, args.engine).join(",");
   if (eng) parts.push(`[${eng}]`);
   if (args.limit && args.limit !== 5) parts.push(`limit=${args.limit}`);
   if (args.maxChars && args.maxChars !== 8000) parts.push(`maxc=${args.maxChars}`);
@@ -421,7 +436,7 @@ function pruneLinkMemory() {
   while (linkMemoryByRef.size > MAX_LINK_MEMORY_ENTRIES) {
     const oldestRef = linkMemoryByRef.keys().next().value;
     if (oldestRef === undefined) break;
-    const rememberedUrl = linkMemoryByRef.get(oldestRef);
+    const rememberedUrl = getRememberedLinkRecord(oldestRef)?.url;
     linkMemoryByRef.delete(oldestRef);
     if (rememberedUrl) {
       linkMemoryByUrl.delete(rememberedUrl);
@@ -712,11 +727,11 @@ function resolveOpenTarget(args) {
     if (Array.isArray(normalizedRefs) && normalizedRefs.length) {
       return normalizedRefs.map((item) => {
         const ref = parsePositiveInt(item, "ref_ids[]");
-        const remembered = linkMemoryByRef.get(ref);
-        if (!remembered) {
+        const remembered = getRememberedLinkRecord(ref);
+        if (!remembered?.url) {
           throw new Error(`No link found in memory for ref ${ref}`);
         }
-        return remembered;
+        return remembered.url;
       });
     }
   }
@@ -724,11 +739,11 @@ function resolveOpenTarget(args) {
   if (hasRef) {
     if (normalizedRef !== undefined && normalizedRef !== null && String(normalizedRef).trim() && Number(normalizedRef) > 0) {
       const ref = parsePositiveInt(normalizedRef, "ref_id");
-      const remembered = linkMemoryByRef.get(ref);
-      if (!remembered) {
+      const remembered = getRememberedLinkRecord(ref);
+      if (!remembered?.url) {
         throw new Error(`No link found in memory for ref ${ref}`);
       }
-      return [remembered];
+      return [remembered.url];
     }
   }
 
@@ -838,11 +853,11 @@ function parseHttpExtractTargets(searchParams) {
   if (refsParam.length) {
     return refsParam.map((item) => {
       const ref = parsePositiveInt(item, "ref_ids[]");
-      const remembered = linkMemoryByRef.get(ref);
-      if (!remembered) {
+      const remembered = getRememberedLinkRecord(ref);
+      if (!remembered?.url) {
         throw new Error(`No link found in memory for ref ${ref}`);
       }
-      return remembered;
+      return remembered.url;
     });
   }
 
@@ -857,11 +872,11 @@ function parseHttpExtractTargets(searchParams) {
   const refParam = searchParams.get("ref_id");
   if (refParam && refParam.trim()) {
     const ref = parsePositiveInt(refParam, "ref_id");
-    const remembered = linkMemoryByRef.get(ref);
-    if (!remembered) {
+    const remembered = getRememberedLinkRecord(ref);
+    if (!remembered?.url) {
       throw new Error(`No link found in memory for ref ${ref}`);
     }
-    return [remembered];
+    return [remembered.url];
   }
 
   const urlParam = String(searchParams.get("url") || "").trim();
@@ -1193,12 +1208,12 @@ function createMcpServer() {
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args = {} } = request.params;
-    const summary = summarizeToolArgs(name, args);
-    const sumTerms = summary.terms?.length ? summary.terms.join(" | ") : "";
-    const sumTargets = summary.urlCount || summary.refCount
-      ? `${summary.urlCount || 0} urls, ${summary.refCount || 0} refs` : "";
+    const reqSum = mcpRequestSummary({
+      method: "tools/call",
+      params: { name, arguments: args }
+    });
 
-    console.error(`📡  ${name}${sumTerms ? " · " + truncateStr(sumTerms, 60) : ""}${sumTargets ? " · " + sumTargets : ""}`);
+    console.error(`📡  ${reqSum}`);
 
     try {
       const t0 = Date.now();

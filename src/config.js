@@ -21,6 +21,8 @@ const SEARCH_ENGINE_VALUES = new Set([
   "mojeek_lp"
 ]);
 
+const BROWSER_BACKEND_VALUES = new Set(["chromium", "cloakbrowser", "lightpanda"]);
+
 function parseBoolean(value, fallback) {
   if (value === undefined || value === null || value === "") return fallback;
   const normalized = String(value).trim().toLowerCase();
@@ -49,6 +51,19 @@ function parseEngines(value, fallback) {
     .filter(Boolean)
     .filter((item) => SEARCH_ENGINE_VALUES.has(item));
   return parsed.length ? [...new Set(parsed)] : fallback;
+}
+
+export function parseBrowserBackend(value, fallback = "cloakbrowser") {
+  const normalizedFallback = BROWSER_BACKEND_VALUES.has(fallback) ? fallback : "cloakbrowser";
+  const normalized = String(value || "").trim().toLowerCase();
+  return BROWSER_BACKEND_VALUES.has(normalized) ? normalized : normalizedFallback;
+}
+
+export function formatBrowserBackendShort(value) {
+  const backend = parseBrowserBackend(value);
+  if (backend === "cloakbrowser") return "cb";
+  if (backend === "chromium") return "ch";
+  return "lp";
 }
 
 async function canAccess(path) {
@@ -203,12 +218,7 @@ export async function loadConfig() {
     lightpandaPath,
     lightpandaPort: parseNumber(process.env.LIGHTPANDA_PORT, 9222),
     cloakbrowserPath,
-    defaultBackend: (() => {
-      const raw = (process.env.BROWSER_BACKEND || "cloakbrowser").toLowerCase();
-      if (raw === "chromium") return "chromium";
-      if (raw === "cloakbrowser") return "cloakbrowser";
-      return "lightpanda";
-    })(),
+    defaultBackend: parseBrowserBackend(process.env.BROWSER_BACKEND, "cloakbrowser"),
     browserOpTimeoutMs: parseNumber(process.env.BROWSER_OP_TIMEOUT_MS, 60000),
     navWaitUntil,
     headless: parseBoolean(process.env.HEADLESS, headlessDefault),
