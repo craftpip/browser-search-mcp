@@ -1,143 +1,214 @@
 # Agents
 
-This project is a Model Context Protocol (MCP) server that provides web search, page extraction, and screenshot capabilities using a real Chromium browser.
+> A Model Context Protocol (MCP) server that provides web search, page extraction, and screenshot capabilities using a real Chromium browser.
+
+## Table of Contents
+
+- [Tool Contract](#tool-contract)
+- [Agent Flow](#agent-flow)
+- [Configuration](#configuration)
+- [Development](#development)
+- [Project Learnings](#project-learnings)
+
+---
 
 ## Tool Contract
 
-### web_search
-- **Purpose**: Primary tool for broad web research across nearly any user request
-- **Input**:
-  - `query` (string) - single query OR
-  - `queries` (string[]) - multiple variants
-  - `limit` (number, default 5)
-  - `engine` (`duckduckgo_api` | `bing_lp` | `mojeek_lp` | `google_ch` | `duckduckgo_ch`)
-  - `engines` (string[])
-- **Output**: `results[]` with `{ title, snippet, llmText, ref_id, link, url }`
+### `web_search`
 
-### web_open_page
-- **Purpose**: Open pages and return cleaned readable text
-- **Input** (choose one mode):
-  - `{ "url": "https://..." }`
-  - `{ "urls": ["https://...", "https://..."] }`
-  - `{ "ref_id": 1 }` - numeric ref from previous `web_search`
-  - `{ "ref_ids": [1, 2, 3] }`
-  - `maxChars` (number, default 8000)
-- **Output**: Per-item success/error with SEO metadata
+Performs broad web research using multiple search engines with automatic fallback and circuit-breaker logic.
 
-### web_page_screenshot
-- **Purpose**: Capture rendered page appearance as images
-- **Input**:
-  - `{ "url": "https://..." }` or `{ "urls": [...] }`
-  - `{ "ref_id": 1 }` or `{ "ref_ids": [1, 2] }
-  - `format` (`png` | `jpeg`, default `png`)
-  - `quality` (1-100 for JPEG)
-  - `fullPage` (default `true`)
-- **Output**: `screenshotBase64` with metadata
+**Input:**
 
-## Recommended Agent Flow
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `query` | `string` | — | Single search query |
+| `queries` | `string[]` | — | Multiple query variants |
+| `limit` | `number` | `5` | Results per query |
+| `engine` | `enum` | `select_best` | Preferred engine: `duckduckgo_api`, `bing_lp`, `mojeek_lp`, `google_ch`, `duckduckgo_ch` |
+| `engines` | `string[]` | — | Multiple engines to query in parallel |
 
-1. Call `web_search` with user intent
-2. Pick best result refs from `results[].ref_id`
-3. Call `web_open_page` with `ref_id` or `ref_ids`
-4. Synthesize answer from extracted text
+**Output:** `results[]` containing `{ title, snippet, llmText, ref_id, link, url }`
 
-For visual verification, call `web_page_screenshot` with the same `ref_id`/`ref_ids`.
+---
 
-## Environment Variables
+### `web_open_page`
+
+Opens pages and returns cleaned, readable text content.
+
+**Input** (choose one mode):
+
+- `url: string` — Single URL
+- `urls: string[]` — Multiple URLs
+- `ref_id: number` — Numeric reference from a prior `web_search`
+- `ref_ids: number[]` — Multiple references
+- `maxChars: number` (default `8000`) — Maximum characters per page
+
+**Output:** Per-item success/error with SEO metadata.
+
+---
+
+### `web_page_screenshot`
+
+Captures rendered page appearance as images.
+
+**Input** (choose one mode):
+
+- `url: string` or `urls: string[]`
+- `ref_id: number` or `ref_ids: number[]`
+- `format: 'png' | 'jpeg'` (default `'png'`)
+- `quality: number` — JPEG quality (1–100)
+- `fullPage: boolean` (default `true`) — Capture entire page
+
+**Output:** `screenshotBase64` with page metadata.
+
+---
+
+## Agent Flow
+
+1. Call `web_search` with the user's intent.
+2. Select the best results using `results[].ref_id`.
+3. Call `web_open_page` with the chosen `ref_id` or `ref_ids`.
+4. Synthesize the answer from extracted text.
+
+For visual verification, call `web_page_screenshot` with the same `ref_id`.
+
+---
+
+## Configuration
+
+### Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `CHROME_PATH` | `/usr/bin/chromium` | Path to Chromium executable |
-| `HEADLESS` | `true` | Run browser headless |
-| `BROWSER_OP_TIMEOUT_MS` | `60000` | Browser operation timeout |
-| `SEARCH_ROUTE_WARMUP_ENGINES` | `duckduckgo_api,google_cb,google_lp,bing_lp,duckduckgo_cb,bing_cb` | Search routes to prewarm |
+| `HEADLESS` | `true` | Run browser in headless mode |
+| `BROWSER_OP_TIMEOUT_MS` | `60000` | Per-operation timeout |
+| `SEARCH_ROUTE_WARMUP_ENGINES` | `duckduckgo_api,google_cb,google_lp,bing_lp,duckduckgo_cb,bing_cb` | Engines to warm up on startup |
 | `SEARCH_ROUTE_CIRCUIT_OPEN_MS` | `300000` | Per-route cooldown after failure |
-| `PRELAUNCH_BROWSER` | `1` | Prelaunch browser on startup |
+| `PRELAUNCH_BROWSER` | `1` | Prelaunch browser on server start |
 | `ENABLE_HTTP_MCP` | `0` | Enable Streamable HTTP transport |
 
-## Development Commands
+### Key Notes
+
+- Reference memory is process-local and resets when the server restarts.
+- Prefer `ref_id` / `ref_ids` immediately after a search within the same session.
+- Sticky search windows are reused for performance.
+
+---
+
+## Development
 
 ```bash
-npm start          # Run MCP server over stdio
-npm run test:mcporter  # Test MCP integration
+npm start                          # Run MCP server over stdio
+npm run test:mcporter              # Test MCP integration
+docker compose build               # Build Docker image
+docker compose down && up -d       # Restart containers
 ```
 
-## Key Notes
-
-- Ref memory is process-local and resets when server restarts
-- Prefer `ref_id`/`ref_ids` immediately after a search in the same session
-- Sticky search windows are reused for performance
-
-## Development Commands
-
-```bash
-npm start          # Run MCP server over stdio
-npm run test:mcporter  # Test MCP integration
-docker compose build   # Build Docker image
-docker compose down && docker compose up -d  # Restart containers
-```
+---
 
 ## Project Learnings
 
-### Branch switch + Docker deploy workflow
+### Creating a GitHub Release with Proper Notes
+
+**Created:** 2026-06-25
+**Last updated:** 2026-06-25
+
+**Trigger:** The first release tag was pushed with `generate_release_notes: true`, which produced only a changelog link instead of meaningful notes.
+
+**Correct approach:**
+
+1. Merge `dev` into `main` (fast-forward).
+2. Tag the release: `git tag v<version> -m "<message>"`
+3. Push the tag: `git push origin v<version>`
+4. The workflow auto-creates a bare release — write proper notes immediately:
+   ```bash
+   gh release edit v<version> --notes-file - << 'NOTES'
+   ## Title
+
+   Write proper release notes with features, fixes, and a changelog link.
+   NOTES
+   ```
+5. Alternatively, create the release from the CLI with full notes before the workflow runs.
+
+**Release notes format:**
+
+```
+## Project Name vX.Y.Z
+
+### Features
+- Major capabilities
+
+### What's Included
+- What ships with the release
+
+**Full Changelog**: <link>
+```
+
+**Verification:** `gh release view v<version>` returns full notes, not just a changelog link.
+
+---
+
+### Branch Switch & Docker Deploy Workflow
 
 **Created:** 2026-06-13
 **Last updated:** 2026-06-13
 
-**Trigger:** User asked to check out a branch, build, and restart container.
+**Trigger:** User asked to check out a branch, build, and restart the container.
 
-**Mistake / Problem:** Tried `npm install` directly on the host instead of using `docker compose build`. The project uses Docker for building and running.
+**Mistake:** Ran `npm install` on the host instead of using `docker compose build`. The project is fully containerized.
 
-**Correct Approach:**
-1. `git checkout <branch-name>` to switch branches
-2. `docker compose build` to rebuild the Docker image with the new code
-3. `docker compose down && docker compose up -d` to restart the container
-4. Check health: `docker exec <container> curl -s localhost:3000/health`
+**Correct approach:**
+
+1. `git checkout <branch-name>`
+2. `docker compose build`
+3. `docker compose down && docker compose up -d`
+4. Verify: `docker exec <container> curl -s localhost:3000/health`
 
 **Verification:** Health endpoint returns `{"ok":true}` with the expected backend and no open circuit breakers.
 
-**Scope:** This project runs fully in Docker. Always use Docker commands for building and deploying.
+---
 
-**Related terms:** branch, checkout, build, deploy, docker compose, restart
+### Diagnosing Container Health
 
-### 2026-06-11 - Diagnosing container health
+**Created:** 2026-06-11
+**Last updated:** 2026-06-11
 
-**Trigger:** User asked "Is this container working?" and later "It's time to learn."
+**Trigger:** User asked whether the containerized MCP server was working.
 
-**Mistake / Problem:** When asked to check if the containerized MCP server was working:
-1. Ran `ps aux` on the host instead of checking Docker containers first
-2. Tried `journalctl` and `strace` which don't apply to Docker containers
-3. Didn't read `docker-compose.yml` to understand the full setup
-4. Wasted multiple round trips on host-level diagnostics
-5. The container was actually running fine — the real issue was all search route circuit breakers were open
+**Mistake:** Ran host-level diagnostics (`ps aux`, `journalctl`, `strace`) instead of Docker commands. The container was healthy; the real issue was open circuit breakers on all search routes.
 
-**Correct Approach:**
-1. Start with `docker ps -a` to see container status
-2. Check `docker logs <container-name>` for runtime errors
-3. Read `docker-compose.yml` to understand config (browser backend, timeouts, env vars)
-4. Check health endpoint: `docker exec <container> curl -s localhost:3000/health`
-5. Check processes: `docker exec <container> ps aux`
-6. The health endpoint also shows circuit breaker status — check for open routes
+**Correct approach:**
 
-**Verification:** Health endpoint returns `{"browserConnected":true,"lightpandaConnected":true}` but `searchRouteCircuitBreakers` may show open routes with remaining cooldown.
+1. `docker ps -a` — Check container status.
+2. `docker logs <container>` — Check runtime errors.
+3. Read `docker-compose.yml` — Understand configuration.
+4. `docker exec <container> curl -s localhost:3000/health` — Check health endpoint (includes circuit breaker status).
+5. `docker exec <container> ps aux` — Check processes inside the container.
 
-**Scope:** This project runs in Docker with a container name like `browser-search-mcp-browser-search-mcp-1`. Always use Docker commands, not host commands, to diagnose the container.
+**Verification:** Health endpoint returns `{"browserConnected":true,"lightpandaConnected":true}`.
 
-### 2026-06-11 - Container has no outbound internet (DOCKER-USER iptables)
+---
 
-**Trigger:** All search engines failing with timeouts despite host having internet. `curl` from inside container returned 000.
+### Container Outbound Internet (DOCKER-USER iptables)
 
-**Mistake / Problem:** Spent time reading code, checking circuit breakers, and tracing iptables chains before checking the most basic thing — can the container reach the internet at all?
+**Created:** 2026-06-11
+**Last updated:** 2026-06-11
 
-**Correct Approach:**
-1. First check: `docker exec <container> curl -s --max-time 5 https://duckduckgo.com`
-2. If that fails, check: `docker exec <container> curl -s --max-time 5 http://1.1.1.1`
-3. Run `iptables -L DOCKER-USER -n -v` on the **host** to look for blanket DROP rules
-4. The fix: `sudo iptables -I DOCKER-USER 4 -s 172.16.0.0/12 -j ACCEPT`
-5. This fix is **not persistent** across reboots — needs to be saved or added to a startup script
+**Trigger:** All search engines timed out despite the host having internet. `curl` from inside the container returned `000`.
 
-**Root cause:** The `DOCKER-USER` chain had `RETURN` for RELATED/ESTABLISHED, a VPN subnet, and loopback, then a catch-all `DROP`. Outbound NEW connections from Docker bridge networks fell through to the DROP.
+**Mistake:** Investigated code, circuit breakers, and iptables chains before checking basic container connectivity.
 
-**Verification:** After fix, `docker exec <container> curl -s --max-time 5 https://duckduckgo.com` returns HTTP 200.
+**Root cause:** The `DOCKER-USER` iptables chain had `RETURN` for RELATED/ESTABLISHED, a VPN subnet, and loopback, followed by a catch-all `DROP`. Outbound NEW connections from Docker bridge networks fell through to the DROP rule.
 
-**Scope:** Host-level iptables configuration issue. Not specific to this project's code. May recur on reboot.
+**Correct approach:**
+
+1. `docker exec <container> curl -s --max-time 5 https://duckduckgo.com`
+2. If that fails: `docker exec <container> curl -s --max-time 5 http://1.1.1.1`
+3. On the host: `iptables -L DOCKER-USER -n -v`
+4. Fix: `sudo iptables -I DOCKER-USER 4 -s 172.16.0.0/12 -j ACCEPT`
+
+> **Note:** This fix is not persistent across reboots. Add it to a startup script.
+
+**Verification:** `docker exec <container> curl -s --max-time 5 https://duckduckgo.com` returns HTTP 200.
