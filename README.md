@@ -395,6 +395,26 @@ Test MCP integration:
 npm run test:mcporter
 ```
 
+## Releases
+
+This repo uses semver tags and GitHub Releases.
+
+To cut a release from `main`:
+
+```bash
+git checkout main
+git pull
+npm run release:patch   # or: npm run release:minor / npm run release:major
+git push origin main --follow-tags
+```
+
+That will:
+
+- update `package.json` and `package-lock.json`
+- create a Git tag like `v1.0.1`
+
+When the `v*.*.*` tag is pushed, GitHub Actions automatically publishes a GitHub Release with generated notes.
+
 ## Security Notes
 
 - This project drives a real browser and can access live web content

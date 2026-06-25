@@ -867,7 +867,7 @@ function dedupeAndMergeResults(results, limitPerEngine) {
     }
   }
 
-  return [...byUrl.values()];
+  return [...byUrl.values()].slice(0, Math.max(1, limitPerEngine || 1));
 }
 
 async function mapWithConcurrency(items, concurrency, mapper) {
@@ -1488,7 +1488,7 @@ export async function browserSearch({ query, queries, limit = 5, engines }) {
     queries: uniqueQueries,
     queryCount: uniqueQueries.length,
     totalResultCount: [...combinedByUrl.values()].length,
-    results: [...combinedByUrl.values()],
+    results: [...combinedByUrl.values()].slice(0, Math.max(1, limit || 1)),
     totalDirectAnswerCount: dedupeDirectAnswers(combinedDirectAnswers).length,
     directAnswers: dedupeDirectAnswers(combinedDirectAnswers),
     queryResults
@@ -1662,7 +1662,9 @@ export async function browserCaptureScreenshot({
         screenshotBase64: screenshot
       };
     } finally {
-      await page.close();
+      if (!page.isClosed()) {
+        await page.close();
+      }
     }
   });
 }

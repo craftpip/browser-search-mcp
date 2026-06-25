@@ -37,7 +37,10 @@
     "bench:search": "node benchmarking/search-benchmark.mjs",
     "bench:all": "node scripts/benchmark.mjs && node benchmarking/search-benchmark.mjs",
     "test:mcporter": "bash scripts/test-mcporter.sh",
-    "docs": "typedoc src/ --out doc"
+    "docs": "typedoc src/ --out doc",
+    "release:patch": "npm version patch",
+    "release:minor": "npm version minor",
+    "release:major": "npm version major"
   },
   "devDependencies": {
     "typedoc": "^0.28.0"

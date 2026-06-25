@@ -20,6 +20,11 @@ let nextLinkRef = 1;
 const screenshotDownloadById = new Map();
 const screenshotStorageDir = path.join(process.cwd(), "screenshots");
 const TOOL_CACHE_TTL_MS = 10 * 60 * 1000;
+const SCREENSHOT_DOWNLOAD_TTL_MS = 60 * 60 * 1000;
+const MAX_HTTP_BODY_BYTES = 1024 * 1024;
+const MAX_LINK_MEMORY_ENTRIES = 2000;
+const MAX_SCREENSHOT_DOWNLOADS = 200;
+const MAX_TOOL_CACHE_ENTRIES = 200;
 const toolResultCache = {
   web_search: new Map(),
   web_open_page: new Map()
@@ -42,6 +47,7 @@ function getCacheKey(args) {
 function getCachedToolResult(toolName, args) {
   const bucket = toolResultCache[toolName];
   if (!bucket) return null;
+  pruneToolCacheBucket(bucket);
   const key = getCacheKey(args);
   const entry = bucket.get(key);
   if (!entry) return null;
@@ -55,11 +61,26 @@ function getCachedToolResult(toolName, args) {
 function setCachedToolResult(toolName, args, value) {
   const bucket = toolResultCache[toolName];
   if (!bucket) return;
+  pruneToolCacheBucket(bucket);
   const key = getCacheKey(args);
   bucket.set(key, {
     value,
     expiresAt: Date.now() + TOOL_CACHE_TTL_MS
   });
+  while (bucket.size > MAX_TOOL_CACHE_ENTRIES) {
+    const oldestKey = bucket.keys().next().value;
+    if (!oldestKey) break;
+    bucket.delete(oldestKey);
+  }
+}
+
+function pruneToolCacheBucket(bucket) {
+  const now = Date.now();
+  for (const [key, entry] of bucket.entries()) {
+    if (!entry || entry.expiresAt <= now) {
+      bucket.delete(key);
+    }
+  }
 }
 
 function asMarkdownContent(text) {
@@ -348,6 +369,8 @@ function resolveDisplayPath(filePath, prefix) {
 
 async function storeScreenshotDownload(entry, config, { enableDownload }) {
   if (!entry?.screenshotBase64) return null;
+  await pruneScreenshotDownloads();
+  await pruneStoredScreenshotFiles();
   await fs.mkdir(screenshotStorageDir, { recursive: true });
   const format = entry?.format === "jpeg" ? "jpeg" : "png";
   const extension = format === "jpeg" ? "jpg" : "png";
@@ -362,7 +385,8 @@ async function storeScreenshotDownload(entry, config, { enableDownload }) {
     screenshotDownloadById.set(downloadId, {
       path: filePath,
       filename,
-      contentType: entry?.contentType || (format === "jpeg" ? "image/jpeg" : "image/png")
+      contentType: entry?.contentType || (format === "jpeg" ? "image/jpeg" : "image/png"),
+      createdAt: Date.now()
     });
     const baseUrl = buildApiBaseUrl(config);
     downloadUrl = `${baseUrl}/download/${downloadId}`;
@@ -380,6 +404,8 @@ function rememberLink(url) {
   const normalized = String(url || "").trim();
   if (!normalized) return null;
 
+  pruneLinkMemory();
+
   const existingRef = linkMemoryByUrl.get(normalized);
   if (existingRef) return existingRef;
 
@@ -387,7 +413,68 @@ function rememberLink(url) {
   nextLinkRef += 1;
   linkMemoryByUrl.set(normalized, ref);
   linkMemoryByRef.set(ref, normalized);
+  pruneLinkMemory();
   return ref;
+}
+
+function pruneLinkMemory() {
+  while (linkMemoryByRef.size > MAX_LINK_MEMORY_ENTRIES) {
+    const oldestRef = linkMemoryByRef.keys().next().value;
+    if (oldestRef === undefined) break;
+    const rememberedUrl = linkMemoryByRef.get(oldestRef);
+    linkMemoryByRef.delete(oldestRef);
+    if (rememberedUrl) {
+      linkMemoryByUrl.delete(rememberedUrl);
+    }
+  }
+}
+
+async function deleteScreenshotRecord(downloadId, record) {
+  screenshotDownloadById.delete(downloadId);
+  if (!record?.path) return;
+  try {
+    await fs.rm(record.path, { force: true });
+  } catch {
+    // ignore cleanup errors
+  }
+}
+
+async function pruneScreenshotDownloads() {
+  const now = Date.now();
+  for (const [downloadId, record] of screenshotDownloadById.entries()) {
+    if (!record?.createdAt || now - record.createdAt > SCREENSHOT_DOWNLOAD_TTL_MS) {
+      await deleteScreenshotRecord(downloadId, record);
+    }
+  }
+
+  while (screenshotDownloadById.size > MAX_SCREENSHOT_DOWNLOADS) {
+    const oldestEntry = screenshotDownloadById.entries().next().value;
+    if (!oldestEntry) break;
+    const [downloadId, record] = oldestEntry;
+    await deleteScreenshotRecord(downloadId, record);
+  }
+}
+
+async function pruneStoredScreenshotFiles() {
+  try {
+    const entries = await fs.readdir(screenshotStorageDir, { withFileTypes: true });
+    const now = Date.now();
+    for (const entry of entries) {
+      if (!entry.isFile()) continue;
+      if (!entry.name.startsWith("screenshot-")) continue;
+      const filePath = path.join(screenshotStorageDir, entry.name);
+      try {
+        const stats = await fs.stat(filePath);
+        if (now - stats.mtimeMs > SCREENSHOT_DOWNLOAD_TTL_MS) {
+          await fs.rm(filePath, { force: true });
+        }
+      } catch {
+        // ignore cleanup errors
+      }
+    }
+  } catch {
+    // ignore cleanup errors
+  }
 }
 
 function decorateResultLinks(results) {
@@ -785,12 +872,20 @@ function parseHttpExtractTargets(searchParams) {
 
 async function readJsonBody(req) {
   const chunks = [];
+  let totalBytes = 0;
   for await (const chunk of req) {
-    chunks.push(chunk);
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    totalBytes += buffer.length;
+    if (totalBytes > MAX_HTTP_BODY_BYTES) {
+      const error = new Error(`Request body too large (max ${MAX_HTTP_BODY_BYTES} bytes)`);
+      error.statusCode = 413;
+      throw error;
+    }
+    chunks.push(buffer);
   }
 
   if (!chunks.length) return {};
-  const raw = Buffer.concat(chunks.map((item) => Buffer.from(item))).toString("utf8").trim();
+  const raw = Buffer.concat(chunks).toString("utf8").trim();
   if (!raw) return {};
   return JSON.parse(raw);
 }
@@ -1174,10 +1269,40 @@ async function maybeStartHttpServer(managerOverride) {
             }
           }
 
-          const t0 = Date.now();
           const isToolCall = body?.method === "tools/call";
+          const t0 = Date.now();
           if (reqSum && isToolCall) {
             console.error(`📡  ${reqSum}`);
+          }
+
+          if (isInitializeRequest(body)) {
+            const transport = new StreamableHTTPServerTransport({
+              sessionIdGenerator: () => randomUUID(),
+              onsessioninitialized: (sid) => {
+                defaultMcpSessionId = sid;
+                mcpTransports.set(sid, transport);
+              }
+            });
+
+            transport.onclose = () => {
+              const sid = transport.sessionId;
+              if (sid) {
+                mcpTransports.delete(sid);
+                if (defaultMcpSessionId === sid) {
+                  defaultMcpSessionId = mcpTransports.keys().next().value || null;
+                }
+              }
+            };
+
+            const mcpServer = createMcpServer();
+            await mcpServer.connect(transport);
+            await transport.handleRequest(req, res, body);
+            if (transport.sessionId) {
+              defaultMcpSessionId = transport.sessionId;
+              mcpTransports.set(transport.sessionId, transport);
+            }
+            console.error(`🤝  MCP initialized`);
+            return;
           }
 
           const response = await handleStatelessMcpPost(body);
@@ -1190,51 +1315,10 @@ async function maybeStartHttpServer(managerOverride) {
           }
 
           const resSum = mcpResponseSummary(response);
-          if (body?.method === "initialize") {
-            console.error(`🤝  MCP initialized`);
-          } else if (isToolCall && reqSum) {
+          if (isToolCall && reqSum) {
             console.error(`📨  ${ms}ms${resSum ? " · " + resSum : ""}`);
           }
           sendJson(res, 200, response);
-          return;
-
-          if (!isInitializeRequest(body)) {
-            sendJson(res, 400, {
-              jsonrpc: "2.0",
-              error: {
-                code: -32000,
-                message: "Bad Request: Missing initialize request"
-              },
-              id: null
-            });
-            return;
-          }
-
-          const transport = new StreamableHTTPServerTransport({
-            sessionIdGenerator: () => randomUUID(),
-            onsessioninitialized: (sid) => {
-              defaultMcpSessionId = sid;
-              mcpTransports.set(sid, transport);
-            }
-          });
-
-          transport.onclose = () => {
-            const sid = transport.sessionId;
-            if (sid) {
-              mcpTransports.delete(sid);
-              if (defaultMcpSessionId === sid) {
-                defaultMcpSessionId = mcpTransports.keys().next().value || null;
-              }
-            }
-          };
-
-          const mcpServer = createMcpServer();
-          await mcpServer.connect(transport);
-          await transport.handleRequest(req, res, body);
-          if (transport.sessionId) {
-            defaultMcpSessionId = transport.sessionId;
-            mcpTransports.set(transport.sessionId, transport);
-          }
           return;
         }
 
@@ -1441,6 +1525,7 @@ async function maybeStartHttpServer(managerOverride) {
         }
 
         const downloadId = decodeURIComponent(url.pathname.split("/").pop() || "").trim();
+        await pruneScreenshotDownloads();
         const record = screenshotDownloadById.get(downloadId);
         if (!record) {
           sendJson(res, 404, { ok: false, error: "Unknown download id" });
@@ -1468,7 +1553,7 @@ async function maybeStartHttpServer(managerOverride) {
         path: req.url || "",
         error: String(error?.message || error)
       });
-      sendJson(res, 500, { ok: false, error: String(error?.message || error) });
+      sendJson(res, Number(error?.statusCode) || 500, { ok: false, error: String(error?.message || error) });
     }
   });
 
