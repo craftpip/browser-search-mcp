@@ -650,6 +650,9 @@ function formatOpenPageResponse(payload) {
       lines.push(`- Error: ${entry.error}`);
       return;
     }
+    if (entry?.tables?.length) {
+      lines.push(`- Tables extracted: ${entry.tables.length}`);
+    }
     if (entry?.text) {
       lines.push("", entry.text.trim());
     }
@@ -788,13 +791,13 @@ async function mapWithConcurrency(items, concurrency, mapper) {
   return results;
 }
 
-async function openTargetsParallel(targetUrls, maxChars, maxParallel, includeSeoAnalysis = false, extractLinks = false) {
+async function openTargetsParallel(targetUrls, maxChars, maxParallel, includeSeoAnalysis = false, extractLinks = false, includeTables = false, maxTableRows) {
   const opened = await mapWithConcurrency(
     targetUrls,
     maxParallel,
     async (targetUrl, index) => {
       try {
-        const page = await browserOpenAndExtract({ url: targetUrl, maxChars, includeSeoAnalysis, extractLinks });
+        const page = await browserOpenAndExtract({ url: targetUrl, maxChars, includeSeoAnalysis, extractLinks, includeTables, maxTableRows });
         return {
           index,
           ok: true,
@@ -964,7 +967,9 @@ function getToolsListResponse() {
               description: "Multiple result ids returned by a previous web_search call"
             },
             maxChars: { type: "number", default: 8000 },
-            extractLinks: { type: "boolean", default: false, description: "Extract links from page content and append as a markdown list" }
+            extractLinks: { type: "boolean", default: false, description: "Extract links from page content and append as a markdown list" },
+            includeTables: { type: "boolean", default: false, description: "Extract HTML tables and append them as structured plain-text tables" },
+            maxTableRows: { type: "number", description: "Optional maximum number of rows to extract per table. Omit for no row limit." }
           },
           description: "Provide one of: url, urls, ref_id, or ref_ids. Prefer ref_id/ref_ids from web_search when available.",
           additionalProperties: false
@@ -1084,8 +1089,12 @@ async function handleToolCall(name, args = {}) {
     const manager = await getBrowserManager();
     mark = timer.step("prepare_execution", mark);
     const extractLinks = args.extractLinks === true;
+    const includeTables = args.includeTables === true;
+    const maxTableRows = args.maxTableRows === undefined || args.maxTableRows === null
+      ? undefined
+      : parsePositiveInt(args.maxTableRows, "maxTableRows");
     const result = await runWithHangGuard(`mcp:${name}`, () =>
-      openTargetsParallel(targetUrls, maxChars, manager.config.openPageMaxParallel, includeSeoAnalysis, extractLinks)
+      openTargetsParallel(targetUrls, maxChars, manager.config.openPageMaxParallel, includeSeoAnalysis, extractLinks, includeTables, maxTableRows)
     );
     mark = timer.step("open_targets", mark);
     const response = formatOpenPageResponse(result);
@@ -1465,8 +1474,11 @@ async function maybeStartHttpServer(managerOverride) {
         mark = timer.step("resolve_targets", mark);
 
         const maxChars = parseMaxChars(url.searchParams.get("maxChars"), 8000);
+        const includeTables = String(url.searchParams.get("includeTables") || "").trim().toLowerCase() === "true";
+        const maxTableRowsParam = String(url.searchParams.get("maxTableRows") || "").trim();
+        const maxTableRows = maxTableRowsParam ? parsePositiveInt(maxTableRowsParam, "maxTableRows") : undefined;
         const payload = await runWithHangGuard("http:/extract", () =>
-          openTargetsParallel(targetUrls, maxChars, manager.config.openPageMaxParallel)
+          openTargetsParallel(targetUrls, maxChars, manager.config.openPageMaxParallel, false, false, includeTables, maxTableRows)
         );
         mark = timer.step("open_targets", mark);
         const markdown = formatOpenPageResponse(payload).content[0].text;

@@ -488,13 +488,183 @@ function sanitizeHtmlSnippet(input, maxChars = MAX_MAIN_HTML_CHARS) {
   return safeTruncateText(stripped, maxChars);
 }
 
-function extractTextFromHtml({ html, url, maxChars, fallbackTitle }) {
+function normalizeTableCellText(input, maxChars = 120) {
+  return safeTruncateText(cleanWhitespace(input), maxChars);
+}
+
+function expandTableRows(rowNodes, maxCellChars) {
+  const grid = [];
+
+  for (let rowIndex = 0; rowIndex < rowNodes.length; rowIndex += 1) {
+    const row = rowNodes[rowIndex];
+    const cells = Array.from(row.children).filter((cell) => /^(TH|TD)$/i.test(cell.tagName));
+    grid[rowIndex] = grid[rowIndex] || [];
+
+    let columnIndex = 0;
+    for (const cell of cells) {
+      while (grid[rowIndex][columnIndex] !== undefined) {
+        columnIndex += 1;
+      }
+
+      const colspan = Math.max(1, Number(cell.colSpan) || 1);
+      const rowspan = Math.max(1, Number(cell.rowSpan) || 1);
+      const text = normalizeTableCellText(cell.textContent || "", maxCellChars);
+
+      for (let rowOffset = 0; rowOffset < rowspan; rowOffset += 1) {
+        const targetRowIndex = rowIndex + rowOffset;
+        grid[targetRowIndex] = grid[targetRowIndex] || [];
+        for (let colOffset = 0; colOffset < colspan; colOffset += 1) {
+          grid[targetRowIndex][columnIndex + colOffset] = text;
+        }
+      }
+
+      columnIndex += colspan;
+    }
+  }
+
+  return grid;
+}
+
+function trimSparseTableColumns(headers, rows) {
+  if (!headers.length) return { headers, rows };
+
+  let start = 0;
+  let end = headers.length - 1;
+  const hasBodyValueAt = (columnIndex) => rows.some((row) => cleanWhitespace(row[columnIndex] || ""));
+  const isGroupOnlyHeader = (columnIndex) => /^(calls|puts)$/i.test(cleanWhitespace(headers[columnIndex] || ""));
+
+  while (start <= end && (!cleanWhitespace(headers[start] || "") || isGroupOnlyHeader(start)) && !hasBodyValueAt(start)) {
+    start += 1;
+  }
+
+  while (end >= start && (!cleanWhitespace(headers[end] || "") || isGroupOnlyHeader(end)) && !hasBodyValueAt(end)) {
+    end -= 1;
+  }
+
+  return {
+    headers: headers.slice(start, end + 1),
+    rows: rows.map((row) => row.slice(start, end + 1))
+  };
+}
+
+function extractTablesFromDocument(doc, {
+  maxTables = 8,
+  maxRowsPerTable,
+  maxCellChars = 120,
+  maxRenderChars
+} = {}) {
+  const tables = [];
+  let renderedChars = 0;
+
+  const shouldSkipTable = (table) => {
+    if (!table) return true;
+    if (table.closest("header, footer, nav, aside")) return true;
+    if (table.getAttribute("role") === "presentation") return true;
+    if (table.hasAttribute("hidden")) return true;
+    return false;
+  };
+
+  for (const table of doc.querySelectorAll("table")) {
+    if (tables.length >= maxTables || (Number.isFinite(maxRenderChars) && renderedChars >= maxRenderChars)) break;
+    if (shouldSkipTable(table)) continue;
+
+    const caption = normalizeTableCellText(table.querySelector("caption")?.textContent || "", 200);
+    const rowNodes = Array.from(table.querySelectorAll("tr"));
+    if (rowNodes.length < 2) continue;
+
+    const headerRowNodes = [];
+    for (const rowNode of rowNodes) {
+      const hasTd = rowNode.querySelector("td");
+      const hasTh = rowNode.querySelector("th");
+      if (!hasTd && hasTh) {
+        headerRowNodes.push(rowNode);
+        continue;
+      }
+      break;
+    }
+
+    const headerGrid = expandTableRows(headerRowNodes, maxCellChars);
+    const headerColumnCount = Math.max(0, ...headerGrid.map((row) => row.length));
+    let headers = Array.from({ length: headerColumnCount }, (_, columnIndex) => {
+      const parts = headerGrid
+        .map((row) => cleanWhitespace(row[columnIndex] || ""))
+        .filter(Boolean);
+      return [...new Set(parts)].join(" ");
+    });
+
+    let rows = [];
+    const bodyRowNodes = rowNodes.slice(headerRowNodes.length);
+    for (const rowNode of bodyRowNodes) {
+      const cells = expandTableRows([rowNode], maxCellChars)[0] || [];
+      if (!cells.some(Boolean)) continue;
+      rows.push(cells);
+      renderedChars += cells.join(" |").length;
+      if ((Number.isFinite(maxRowsPerTable) && rows.length >= maxRowsPerTable) || (Number.isFinite(maxRenderChars) && renderedChars >= maxRenderChars)) break;
+    }
+
+    if (!headers.length && rows.length) {
+      headers = rows.shift() || [];
+    }
+
+    ({ headers, rows } = trimSparseTableColumns(headers, rows));
+
+    const columnCount = Math.max(headers.length, ...rows.map((row) => row.length), 0);
+    if (columnCount < 2 || rows.length < 1) continue;
+    if (columnCount === 2 && rows.length === 1) continue;
+
+    tables.push({
+      caption,
+      headers,
+      rows
+    });
+  }
+
+  return tables;
+}
+
+function renderExtractedTables(tables, maxChars = 12000) {
+  if (!Array.isArray(tables) || !tables.length) return "";
+
+  const lines = ["", "## Extracted Tables"];
+  let remaining = Math.max(0, maxChars);
+
+  for (let index = 0; index < tables.length; index += 1) {
+    if (remaining <= 0) break;
+    const table = tables[index];
+    const heading = `### Table ${index + 1}${table.caption ? `: ${table.caption}` : ""}`;
+    lines.push("", heading);
+    remaining -= heading.length;
+
+    if (table.headers?.length) {
+      const headerLine = table.headers.join(" | ");
+      if (remaining <= headerLine.length) break;
+      lines.push(headerLine);
+      remaining -= headerLine.length;
+    }
+
+    for (const row of table.rows || []) {
+      const rowLine = row.join(" | ");
+      if (remaining <= rowLine.length) {
+        lines.push("...");
+        remaining = 0;
+        break;
+      }
+      lines.push(rowLine);
+      remaining -= rowLine.length;
+    }
+  }
+
+  return lines.join("\n").trimEnd();
+}
+
+function extractTextFromHtml({ html, url, maxChars, fallbackTitle, includeTables = false, maxTableRows }) {
   const safeHtml = typeof html === "string" ? html : "";
   const dom = new JSDOM(safeHtml || "<body></body>", { url });
 
   try {
     const doc = dom.window.document;
     doc.querySelectorAll(NON_CONTENT_SELECTORS.join(",")).forEach((node) => node.remove());
+    const tables = includeTables ? extractTablesFromDocument(doc, { maxRowsPerTable: maxTableRows }) : [];
 
     let article = null;
     try {
@@ -514,7 +684,8 @@ function extractTextFromHtml({ html, url, maxChars, fallbackTitle }) {
       return {
         title: cleanWhitespace(article.title || fallbackTitle || ""),
         url,
-        text
+        text,
+        ...(tables.length ? { tables } : {})
       };
     }
 
@@ -528,7 +699,8 @@ function extractTextFromHtml({ html, url, maxChars, fallbackTitle }) {
       url,
       text: weatherSummary
         ? cleanAndTruncateText(weatherSummary.join("\n"), maxChars)
-        : buildCleanText(lines, maxChars)
+        : buildCleanText(lines, maxChars),
+      ...(tables.length ? { tables } : {})
     };
   } finally {
     dom.window.close();
@@ -1550,7 +1722,7 @@ function extractLinksFromHtml({ html, url }) {
   }
 }
 
-export async function browserOpenAndExtract({ url, maxChars = 8000, includeSeoAnalysis = true, extractLinks = false }) {
+export async function browserOpenAndExtract({ url, maxChars = 8000, includeSeoAnalysis = true, extractLinks = false, includeTables = false, maxTableRows }) {
   const manager = await getBrowserManager();
 
   return manager.withPageSlot(async () => {
@@ -1631,7 +1803,9 @@ export async function browserOpenAndExtract({ url, maxChars = 8000, includeSeoAn
         html,
         url: resolvedUrl,
         maxChars,
-        fallbackTitle: pageTitle
+        fallbackTitle: pageTitle,
+        includeTables,
+        maxTableRows
       });
 
       const seoAnalysis =
@@ -1656,6 +1830,13 @@ export async function browserOpenAndExtract({ url, maxChars = 8000, includeSeoAn
             linkLines.push(`- [${label}](${link.href})`);
           }
           finalText = (finalText + "\n" + linkLines.join("\n")).trim();
+        }
+      }
+
+      if (includeTables && extracted.tables?.length) {
+        const renderedTables = renderExtractedTables(extracted.tables, Math.max(maxChars, 12000));
+        if (renderedTables) {
+          finalText = (finalText + "\n\n" + renderedTables).trim();
         }
       }
 

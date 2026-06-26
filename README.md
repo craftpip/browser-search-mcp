@@ -258,7 +258,7 @@ Under the hood it uses DOM cleanup, Mozilla Readability, and a semantic main-con
 Example input:
 
 ```json
-{ "url": "https://example.com", "maxChars": 8000 }
+{ "url": "https://example.com", "maxChars": 8000, "includeTables": true }
 ```
 
 Also supports:
@@ -266,6 +266,9 @@ Also supports:
 - `urls`
 - `ref_id`
 - `ref_ids`
+- `extractLinks`
+- `includeTables`
+- `maxTableRows` (optional row cap; omitted means no table row limit)
 
 ### `web_page_screenshot`
 
