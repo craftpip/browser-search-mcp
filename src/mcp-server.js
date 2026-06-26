@@ -788,13 +788,13 @@ async function mapWithConcurrency(items, concurrency, mapper) {
   return results;
 }
 
-async function openTargetsParallel(targetUrls, maxChars, maxParallel, includeSeoAnalysis = false) {
+async function openTargetsParallel(targetUrls, maxChars, maxParallel, includeSeoAnalysis = false, extractLinks = false) {
   const opened = await mapWithConcurrency(
     targetUrls,
     maxParallel,
     async (targetUrl, index) => {
       try {
-        const page = await browserOpenAndExtract({ url: targetUrl, maxChars, includeSeoAnalysis });
+        const page = await browserOpenAndExtract({ url: targetUrl, maxChars, includeSeoAnalysis, extractLinks });
         return {
           index,
           ok: true,
@@ -963,7 +963,8 @@ function getToolsListResponse() {
               items: { type: "number" },
               description: "Multiple result ids returned by a previous web_search call"
             },
-            maxChars: { type: "number", default: 8000 }
+            maxChars: { type: "number", default: 8000 },
+            extractLinks: { type: "boolean", default: false, description: "Extract links from page content and append as a markdown list" }
           },
           description: "Provide one of: url, urls, ref_id, or ref_ids. Prefer ref_id/ref_ids from web_search when available.",
           additionalProperties: false
@@ -1082,8 +1083,9 @@ async function handleToolCall(name, args = {}) {
     const includeSeoAnalysis = args.includeSeoAnalysis !== false;
     const manager = await getBrowserManager();
     mark = timer.step("prepare_execution", mark);
+    const extractLinks = args.extractLinks === true;
     const result = await runWithHangGuard(`mcp:${name}`, () =>
-      openTargetsParallel(targetUrls, maxChars, manager.config.openPageMaxParallel, includeSeoAnalysis)
+      openTargetsParallel(targetUrls, maxChars, manager.config.openPageMaxParallel, includeSeoAnalysis, extractLinks)
     );
     mark = timer.step("open_targets", mark);
     const response = formatOpenPageResponse(result);

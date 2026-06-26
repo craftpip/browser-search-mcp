@@ -247,3 +247,23 @@ docker compose down && up -d       # Restart containers
 > **Note:** This fix is not persistent across reboots. Add it to a startup script.
 
 **Verification:** `docker exec <container> curl -s --max-time 5 https://duckduckgo.com` returns HTTP 200.
+
+---
+
+### Docker Compose Comment Style
+
+**Created:** 2026-06-26
+**Last updated:** 2026-06-26
+
+**Trigger:** User wanted the docker-compose.yml to be friendlier for first-time devs.
+
+**Style rules:**
+
+1. Group env vars by topic with section headers.
+2. Put the 5-8 most commonly changed vars at the top with a "Most commonly changed" header.
+3. Comments should be short and human — `name (port) — what it's for` pattern. No over-explaining or robotic phrasing.
+4. Ports that are optional (VNC/noVNC) should be commented out with a single note explaining why you'd uncomment them.
+5. Self-explanatory ports (MCP) need only a brief label comment like `# MCP port (3000) — where the server listens for tool calls`.
+6. Consistent comment formatting across the file.
+
+**Verification:** A dev can open the file and know which env vars to touch within 30 seconds.

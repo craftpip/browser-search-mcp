@@ -1495,7 +1495,62 @@ export async function browserSearch({ query, queries, limit = 5, engines }) {
   };
 }
 
-export async function browserOpenAndExtract({ url, maxChars = 8000, includeSeoAnalysis = true }) {
+function extractLinksFromHtml({ html, url }) {
+  const dom = new JSDOM(html || "<body></body>", { url });
+  try {
+    const doc = dom.window.document;
+
+    let article = null;
+    try {
+      const reader = new Readability(dom.window.document);
+      article = reader.parse();
+    } catch {
+      article = null;
+    }
+
+    let container = null;
+    if (article?.content) {
+      const frag = dom.window.document.createElement("div");
+      frag.innerHTML = article.content;
+      container = frag;
+    }
+
+    if (!container) {
+      doc.querySelectorAll(NON_CONTENT_SELECTORS.join(",")).forEach((n) => n.remove());
+      container = doc.body;
+    }
+
+    const links = [];
+    const seen = new Set();
+
+    container.querySelectorAll("a[href]").forEach((a) => {
+      const href = a.getAttribute("href");
+      if (!href || href.startsWith("#") || href.startsWith("javascript:")) return;
+
+      let absoluteHref;
+      try {
+        absoluteHref = new URL(href, url).href;
+      } catch {
+        return;
+      }
+      if (seen.has(absoluteHref)) return;
+      seen.add(absoluteHref);
+
+      links.push({
+        text: (a.textContent || "").replace(/\s+/g, " ").trim().slice(0, 200),
+        href: absoluteHref,
+        rel: a.getAttribute("rel") || "",
+        type: a.getAttribute("type") || ""
+      });
+    });
+
+    return links;
+  } finally {
+    dom.window.close();
+  }
+}
+
+export async function browserOpenAndExtract({ url, maxChars = 8000, includeSeoAnalysis = true, extractLinks = false }) {
   const manager = await getBrowserManager();
 
   return manager.withPageSlot(async () => {
@@ -1590,9 +1645,23 @@ export async function browserOpenAndExtract({ url, maxChars = 8000, includeSeoAn
           ? seoAnalysis.mainContentText
           : extracted.text;
 
+      let finalText = selectedText || extracted.text || "";
+
+      if (extractLinks) {
+        const links = extractLinksFromHtml({ html, url: resolvedUrl });
+        if (links.length) {
+          const linkLines = ["", "## Links"];
+          for (const link of links) {
+            const label = link.text || link.href;
+            linkLines.push(`- [${label}](${link.href})`);
+          }
+          finalText = (finalText + "\n" + linkLines.join("\n")).trim();
+        }
+      }
+
       return {
         ...extracted,
-        text: selectedText || extracted.text || "",
+        text: finalText,
         ...(seoAnalysis ? { seo: seoAnalysis } : {})
       };
     } finally {
